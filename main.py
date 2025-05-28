@@ -88,7 +88,7 @@ async def create_checkout_session(session: CheckoutSession):
     # ВАЖНО: serviceUrl теперь должен включать префикс /api/pay/
     # BACKEND_URL_BASE должен быть https://dreamcatcher.guru
     # FRONTEND_URL для returnUrl - https://dreamcatcher.guru
-    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://dreamcatcher.guru')
+    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
     
     payment_form_data = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
