@@ -33,20 +33,6 @@ app = FastAPI() # Основное приложение FastAPI
 # Все пути, определенные в этом роутере, будут начинаться с /api/pay
 payment_api_router = APIRouter(prefix="/api/pay")
 
-@payment_api_router.api_route("/payment-return", methods=["GET", "POST"], include_in_schema=False)
-async def payment_return(request: Request):
-    form = await request.form() if request.method == "POST" else {}
-    status = form.get("transactionStatus") or "Unknown"
-    approved = status == "Approved"
-
-    html = f"""
-    <html><body style="font-family:sans-serif;text-align:center;padding-top:40px">
-        <h2>{'✅ Оплата получена' if approved else '⏳ Платёж не завершён'}</h2>
-        <p>{'Можете вернуться в бот.' if approved else 'Если вы закрыли форму случайно, попробуйте оплатить ещё раз.'}</p>
-        <script>setTimeout(()=>window.close(),1500)</script>
-    </body></html>"""
-    return HTMLResponse(html)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -119,7 +105,7 @@ async def create_checkout_session(session: CheckoutSession):
         "clientAccountId": session.user_id,
         "merchantSignature": merchant_signature,
         "language": "UA",
-        "returnUrl": os.getenv("RETURN_URL"),
+        "returnUrl": f"{frontend_url_for_return}/payment-return.html",
         # ИЗМЕНЕНО: serviceUrl теперь с префиксом /api/pay/
         "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook"
     }
