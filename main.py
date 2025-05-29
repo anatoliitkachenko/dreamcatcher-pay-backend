@@ -85,10 +85,8 @@ async def create_checkout_session(session: CheckoutSession):
     merchant_signature = make_outgoing_signature(WAYFORPAY_SECRET_KEY, params_for_signature)
     logger.info(f"Сгенерированная исходящая подпись: {merchant_signature}")
 
-    # ВАЖНО: serviceUrl теперь должен включать префикс /api/pay/
-    # BACKEND_URL_BASE должен быть https://dreamcatcher.guru
-    # FRONTEND_URL для returnUrl - https://dreamcatcher.guru
     base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
+    frontend_url_for_return = os.getenv('FRONTEND_URL', 'https://dreamcatcher.guru') 
     
     payment_form_data = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
