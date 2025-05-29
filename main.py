@@ -124,7 +124,7 @@ async def create_checkout_session(session: CheckoutSession):
         "clientAccountId": session.user_id,
         "merchantSignature": merchant_signature,
         "language": "UA",
-        "returnUrl": f"{os.getenv('FRONTEND_URL', 'https://dreamcatcher.guru')}/payment-return",
+        "returnUrl": os.getenv("RETURN_URL"),
         # ИЗМЕНЕНО: serviceUrl теперь с префиксом /api/pay/
         "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook"
     }
