@@ -33,22 +33,17 @@ app = FastAPI() # Основное приложение FastAPI
 # Все пути, определенные в этом роутере, будут начинаться с /api/pay
 payment_api_router = APIRouter(prefix="/api/pay")
 
-@payment_api_router.api_route(
-        "/payment-return",
-        methods=["GET", "POST"],
-        include_in_schema=False
-)
-async def payment_return(_: Request):
-    html = """
-    <html><body style="font-family: sans-serif; text-align:center; padding-top:40px">
-        <h2>✅ Оплата получена</h2>
-        <p>Можете вернуться в&nbsp;бот.</p>
-        <script>
-        setTimeout(()=>{ 
-            if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close(); 
-            window.close();
-        }, 1200);
-        </script>
+@payment_api_router.api_route("/payment-return", methods=["GET", "POST"], include_in_schema=False)
+async def payment_return(request: Request):
+    form = await request.form() if request.method == "POST" else {}
+    status = form.get("transactionStatus") or "Unknown"
+    approved = status == "Approved"
+
+    html = f"""
+    <html><body style="font-family:sans-serif;text-align:center;padding-top:40px">
+        <h2>{'✅ Оплата получена' if approved else '⏳ Платёж не завершён'}</h2>
+        <p>{'Можете вернуться в бот.' if approved else 'Если вы закрыли форму случайно, попробуйте оплатить ещё раз.'}</p>
+        <script>setTimeout(()=>window.close(),1500)</script>
     </body></html>"""
     return HTMLResponse(html)
 
