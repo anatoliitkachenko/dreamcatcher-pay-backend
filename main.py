@@ -2,7 +2,8 @@ import os
 import hmac
 import hashlib
 import base64
-from fastapi import FastAPI, Request, HTTPException, APIRouter # <--- Добавлен APIRouter
+from fastapi import FastAPI, Request, HTTPException, APIRouter 
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Optional
@@ -10,7 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import logging
-from pytz import timezone # <--- ДОБАВЛЕН ЭТОТ ИМПОРТ
+from pytz import timezone 
 
 load_dotenv()
 
@@ -32,6 +33,24 @@ app = FastAPI() # Основное приложение FastAPI
 # Все пути, определенные в этом роутере, будут начинаться с /api/pay
 payment_api_router = APIRouter(prefix="/api/pay")
 
+@payment_api_router.api_route(
+        "/payment-return",
+        methods=["GET", "POST"],
+        include_in_schema=False
+)
+async def payment_return(_: Request):
+    html = """
+    <html><body style="font-family: sans-serif; text-align:center; padding-top:40px">
+        <h2>✅ Оплата получена</h2>
+        <p>Можете вернуться в&nbsp;бот.</p>
+        <script>
+        setTimeout(()=>{ 
+            if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close(); 
+            window.close();
+        }, 1200);
+        </script>
+    </body></html>"""
+    return HTMLResponse(html)
 
 app.add_middleware(
     CORSMiddleware,
