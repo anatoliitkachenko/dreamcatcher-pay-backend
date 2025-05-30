@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, HTTPException, APIRouter
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
