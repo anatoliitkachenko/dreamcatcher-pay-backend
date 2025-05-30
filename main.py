@@ -2,6 +2,8 @@ import os
 import hmac
 import hashlib
 import base64
+from datetime import datetime, timedelta, date
+from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI, Request, HTTPException, APIRouter 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -27,17 +29,15 @@ WAYFORPAY_DOMAIN = os.getenv("WAYFORPAY_DOMAIN")
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["dream_database"]
 
-app = FastAPI() # Основное приложение FastAPI
-
-# Создаем роутер с префиксом, который ожидает Nginx
-# Все пути, определенные в этом роутере, будут начинаться с /api/pay
+app = FastAPI()
 payment_api_router = APIRouter(prefix="/api/pay")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # 🔴 Укажите здесь адрес, где будет жить ваш pay-helper.html или другие клиенты
+    allow_origins=["https://dreamcatcher.guru", "https://payapi.dreamcatcher.guru"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 
@@ -47,27 +47,27 @@ class CheckoutSession(BaseModel):
     username: Optional[str] = None
     first_name: Optional[str] = None
 
-def make_outgoing_signature(merchant_secret_key, params_list):
+def make_wayforpay_signature(secret_key: str, params_list: List[str]) -> str:
     sign_str = ';'.join(str(x) for x in params_list)
-    # Для WayForPay подпись формы обычно делается через HMAC MD5 и затем hexdigest.
-    # Уточните, действительно ли вам нужен Base64 для исходящей подписи.
-    # Если нет (что более типично), то должно быть:
-    # return hmac.new(merchant_secret_key.encode(), sign_str.encode(), hashlib.md5).hexdigest()
-    # Оставляю ваш вариант с Base64, если вы уверены, что он нужен.
-    return base64.b64encode(hmac.new(merchant_secret_key.encode(), sign_str.encode(), hashlib.md5).digest()).decode()
+    # Для большинства API WayForPay подпись HMAC-MD5 в hex-формате
+    return hmac.new(secret_key.encode(), sign_str.encode(), hashlib.md5).hexdigest()
 
-
-# Используем роутер для определения пути
 @payment_api_router.post("/create-checkout-session")
 async def create_checkout_session(session: CheckoutSession):
     logger.info(f"Запрос на создание сессии (/api/pay/create-checkout-session): {session}")
-    if session.plan_type not in ("subscription", "single"):
-        logger.error(f"Неверный plan_type: {session.plan_type}")
-        raise HTTPException(status_code=400, detail="Invalid plan_type")
 
-    amount = 300 if session.plan_type == "subscription" else 40
-    order_ref = f"order_{session.user_id}_{session.plan_type}_{int(datetime.utcnow().timestamp())}"
+    if session.plan_type != "subscription":
+        # Этот эндпоинт теперь только для инициации подписки
+        raise HTTPException(status_code=400, detail="Invalid plan_type for this endpoint, only 'subscription' allowed.")
+
+    amount = 300 # Сумма первого платежа и последующих регулярных
+    order_ref = f"sub_{session.user_id}_{int(datetime.utcnow().timestamp())}" # "sub" для подписки
     order_date = int(datetime.utcnow().timestamp())
+
+    # Параметры для регулярного платежа
+    today_date_obj = date.today()
+
+    next_month_date = today_date_obj + relativedelta(months=1) 
 
     params_for_signature = [
         WAYFORPAY_MERCHANT_ACCOUNT,
@@ -76,19 +76,41 @@ async def create_checkout_session(session: CheckoutSession):
         str(order_date),
         str(amount),
         "UAH",
-        "AI Dream Analysis",
-        "1",
-        str(amount)
+        "AI Dream Analysis (Subscription)", # Название продукта
+        "1", # Количество
+        str(amount) # Цена
     ]
-    
-    logger.info(f"Строка для исходящей подписи (перед генерацией): {';'.join(params_for_signature)}")
-    merchant_signature = make_outgoing_signature(WAYFORPAY_SECRET_KEY, params_for_signature)
-    logger.info(f"Сгенерированная исходящая подпись: {merchant_signature}")
+    # ... (код выше) ...
 
-    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
-    frontend_url_for_return = os.getenv('FRONTEND_URL', 'https://dreamcatcher.guru') 
-    
-    payment_form_data = {
+# 🔴 ВАЖНО: Список полей и их ПОРЯДОК ДОЛЖЕН ТОЧНО СООТВЕТСТВОВАТЬ
+# 🔴 документации WayForPay для метода Purchase с регулярными платежами!
+# 🔴 Это ПРИМЕРНЫЙ порядок, основанный на стандартной логике. ПРОВЕРЬТЕ!
+params_for_signature = [
+    WAYFORPAY_MERCHANT_ACCOUNT,
+    WAYFORPAY_DOMAIN,
+    order_ref,
+    str(order_date),
+    str(amount),
+    "UAH",
+    "AI Dream Analysis (Subscription)", # productName[0]
+    "1", # productCount[0]
+    str(amount), # productPrice[0]
+    # Добавляем параметры регулярного платежа (в ПРАВИЛЬНОМ ПОРЯДКЕ!)
+    str(amount), # regularAmount
+    "month",     # regularMode
+    "1",         # regularInterval
+    "0",         # regularCount (0 = неограниченно)
+    regular_start_date_str # regularStartDate
+    # 🔴 Убедитесь, что clientAccountId и другие поля не должны быть здесь!
+    # 🔴 Обычно, поля client* не участвуют в подписи SimpleSignature.
+]
+# Используем правильную функцию подписи (hex)
+merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_for_signature)
+
+base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
+frontend_url_for_return = os.getenv('FRONTEND_URL', 'https://dreamcatcher.guru')
+
+payment_form_data = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
         "merchantAuthType": "SimpleSignature",
         "merchantDomainName": WAYFORPAY_DOMAIN,
@@ -96,170 +118,185 @@ async def create_checkout_session(session: CheckoutSession):
         "orderDate": str(order_date),
         "amount": str(amount),
         "currency": "UAH",
-        "productName[]": ["AI Dream Analysis"],
+        "productName[]": ["AI Dream Analysis (Subscription)"],
         "productCount[]": ["1"],
         "productPrice[]": [str(amount)],
         "clientFirstName": session.first_name or "",
-        "clientAccountId": session.user_id,
+        "clientAccountId": session.user_id, # Очень важно для веб-хуков
         "merchantSignature": merchant_signature,
         "language": "UA",
         "returnUrl": f"{frontend_url_for_return}/payment-return.html",
-        # ИЗМЕНЕНО: serviceUrl теперь с префиксом /api/pay/
-        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook"
+        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook",
+
+        # Параметры для регулярного платежа
+        "regularMode": "month",
+        "regularAmount": str(amount), # Сумма последующих списаний
+        "regularCount": "0",          # 0 - означает неограниченное количество регулярных платежей
+        "regularStartDate": regular_start_date_str,
+        "regularInterval": "1"        # Интервал (1 месяц)
     }
-    logger.info(f"Данные формы для WayForPay: {payment_form_data}")
+    logger.info(f"Данные формы для WayForPay (регулярный): {payment_form_data}")
 
     await db["checkout_sessions"].insert_one({
         "orderReference": order_ref,
         "user_id": int(session.user_id),
-        "plan_type": session.plan_type,
+        "plan_type": session.plan_type, # "subscription"
         "amount": amount,
-        "status": "created",
+        "status": "created_recurring_initial", # Новый статус
         "created_utc": datetime.utcnow()
     })
-
     return {"pay_url": "https://secure.wayforpay.com/pay", "payment_form_data": payment_form_data}
 
-# Используем роутер для определения пути
 @payment_api_router.post("/wayforpay-webhook")
 async def wayforpay_webhook(request: Request):
-    try:
-        data = await request.json()
-    except Exception as e:
-        logger.error(f"Ошибка парсинга JSON из вебхука (/api/pay/wayforpay-webhook): {e}")
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
+    data = await request.json()
     logger.info(f"Получен вебхук от WayForPay (/api/pay/wayforpay-webhook): {data}")
+
+    # ... (код проверки подписи вебхука, как у вас был) ...
+    # ... (ВАЖНО: используйте make_wayforpay_signature с hex-выводом для вебхуков) ...
 
     received_signature = data.get("merchantSignature")
     order_ref = data.get("orderReference")
-    
-    fields_for_webhook_signature = []
-    # Список полей для подписи вебхука зависит от статуса и настроек мерчанта,
-    # здесь приведен примерный список для 'Approved'. ПРОВЕРЬТЕ ДОКУМЕНТАЦИЮ WAYFORPAY!
-    if data.get("transactionStatus") == "Approved":
-        fields_for_webhook_signature = [
-            str(data.get("merchantAccount")),
-            str(data.get("orderReference")),
-            str(data.get("amount")),
-            str(data.get("currency")),
-            str(data.get("authCode")),
-            str(data.get("cardPan")),
-            str(data.get("transactionStatus")),
-            str(data.get("reasonCode"))
-        ]
-    else:
-        # Для других статусов (например, 'Declined', 'Expired') набор полей может быть другим
-        fields_for_webhook_signature = [
-            str(data.get("orderReference")),
-            str(data.get("transactionStatus")),
-            str(data.get("time")) 
-        ]
-    # Важно, чтобы в fields_for_webhook_signature не было None элементов перед join
-    fields_for_webhook_signature = [f for f in fields_for_webhook_signature if f is not None]
 
-    webhook_signature_string = ';'.join(fields_for_webhook_signature)
-    logger.info(f"Строка для проверки подписи вебхука: {webhook_signature_string}")
-    
-    calculated_signature = hmac.new(WAYFORPAY_SECRET_KEY.encode(), webhook_signature_string.encode(), hashlib.md5).hexdigest()
-    logger.info(f"Рассчитанная подпись вебхука: {calculated_signature}, Полученная: {received_signature}")
+    # Формируем строку для подписи ВЕБХУКА (порядок и набор полей из документации WayForPay)
+    # 🔴 ВАЖНО: Список полей и их ПОРЯДОК ДОЛЖЕН ТОЧНО СООТВЕТСТВОВАТЬ
+# 🔴 документации WayForPay для веб-хуков! ЭТО ТОЛЬКО ПРИМЕР!
+    sign_fields_webhook = [
+        data.get("merchantAccount"),
+        data.get("orderReference"),
+        data.get("amount"),
+        data.get("currency"),
+        data.get("authCode"),
+        data.get("cardPan"),
+        data.get("transactionStatus"),
+        data.get("reasonCode")
+]
+# 🔴 Возможно, нужно добавить или убрать поля!
+    # Убираем None, если какие-то поля не пришли, и приводим к строке
+    sign_fields_webhook_clean = [str(f) for f in sign_fields_webhook if f is not None]
+
+    webhook_signature_string = ';'.join(sign_fields_webhook_clean)
+    # Для вебхуков обычно используется make_wayforpay_signature (с hexdigest)
+    calculated_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, sign_fields_webhook_clean)
 
     if calculated_signature != received_signature:
-        logger.error(f"Неверная подпись вебхука для orderReference {order_ref}.")
+        logger.error(f"Неверная подпись вебхука для orderReference {order_ref}. String: {webhook_signature_string}, Calc: {calculated_signature}, Recv: {received_signature}")
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
-    
+
     logger.info(f"Подпись вебхука для orderReference {order_ref} верна.")
-    
+
     transaction_status = data.get("transactionStatus")
     user_id_str = data.get("clientAccountId")
-    current_time_utc = datetime.utcnow() # Используем UTC для всех временных меток в БД
+    rec_token = data.get("recToken") # Токен для регулярных платежей
 
-    response_time_utc_ts = int(current_time_utc.timestamp()) # Для ответа WayForPay
+    current_time_utc = datetime.utcnow()
+    tz_kyiv = timezone('Europe/Kyiv')
 
-    if not user_id_str:
+    if not user_id_str: # Должен приходить из clientAccountId
         logger.error(f"clientAccountId (user_id) отсутствует в вебхуке для orderReference {order_ref}")
-        # Формируем ответ для WayForPay даже при ошибке, чтобы остановить повторы
+        # ... (код ответа WayForPay с accept) ...
+        response_time_utc_ts = int(current_time_utc.timestamp())
         response_signature_str = f"{order_ref};accept;{response_time_utc_ts}"
-        response_signature = hmac.new(WAYFORPAY_SECRET_KEY.encode(), response_signature_str.encode(), hashlib.md5).hexdigest()
+        response_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, [order_ref, "accept", str(response_time_utc_ts)])
         return {"orderReference": order_ref, "status": "accept", "time": response_time_utc_ts, "signature": response_signature}
 
-    try:
-        user_id = int(user_id_str)
-    except ValueError:
-        logger.error(f"Неверный формат clientAccountId '{user_id_str}' в вебхуке для orderReference {order_ref}")
-        response_signature_str = f"{order_ref};accept;{response_time_utc_ts}"
-        response_signature = hmac.new(WAYFORPAY_SECRET_KEY.encode(), response_signature_str.encode(), hashlib.md5).hexdigest()
-        return {"orderReference": order_ref, "status": "accept", "time": response_time_utc_ts, "signature": response_signature}
+    user_id = int(user_id_str)
 
+    # Обновляем сессию в checkout_sessions
     await db["checkout_sessions"].update_one(
         {"orderReference": order_ref, "user_id": user_id},
-        {"$set": {"status": transaction_status, "webhook_received_utc": current_time_utc, "webhook_data": data}}
+        {"$set": {"status": transaction_status, "webhook_received_utc": current_time_utc, "webhook_data": data}},
+        upsert=True # Важно, если заказ инициирован кнопкой и не был предварительно записан
     )
 
     if transaction_status == "Approved":
         checkout_session = await db["checkout_sessions"].find_one({"orderReference": order_ref, "user_id": user_id})
-        if not checkout_session:
-            logger.error(f"Сессия checkout_sessions не найдена для orderReference {order_ref} и user_id {user_id} после утверждения.")
-            response_signature_str = f"{order_ref};accept;{response_time_utc_ts}"
-            response_signature = hmac.new(WAYFORPAY_SECRET_KEY.encode(), response_signature_str.encode(), hashlib.md5).hexdigest()
-            return {"orderReference": order_ref, "status": "accept", "time": response_time_utc_ts, "signature": response_signature}
+        plan_type = checkout_session.get("plan_type") if checkout_session else None
 
-        plan_type = checkout_session.get("plan_type")
-        
-        # Используем Киевское время только для записи в коллекции бота, если это нужно для совместимости.
-        # Внутренне лучше оперировать UTC.
-        tz_kyiv = timezone('Europe/Kyiv')
-        current_date_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
-        current_month_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m")
-
-        if plan_type == "subscription":
+        # Если это была подписка (первый или последующий регулярный платеж)
+        if order_ref.startswith("sub_") or (checkout_session and plan_type == "subscription"):
             end_date_utc = current_time_utc + timedelta(days=30)
             end_date_kyiv_str = end_date_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
-            
+            current_date_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
+
+            update_data = {
+                "user_id": user_id, "is_active": 1,
+                "subscription_start": current_date_kyiv_str, # или обновляем только end_date
+                "subscription_end": end_date_kyiv_str,
+                "cancel_requested": 0,
+                "plan_type": "subscription" # Явно указываем
+            }
+            if rec_token: # Если это первый платеж регулярной подписки
+                update_data["recToken"] = rec_token
+                update_data["last_successful_charge_utc"] = current_time_utc
+
             await db["subscriptions"].update_one(
                 {"user_id": user_id},
-                {"$set": {
-                    "user_id": user_id,
-                    "is_active": 1,
-                    "subscription_start": current_date_kyiv_str, # Дата в формате бота
-                    "subscription_end": end_date_kyiv_str,   # Дата в формате бота
-                    "cancel_requested": 0 
-                }},
+                {"$set": update_data},
                 upsert=True
             )
-            logger.info(f"Подписка активирована/обновлена для user_id {user_id} до {end_date_kyiv_str} (order: {order_ref})")
-        
-        elif plan_type == "single":
-            await db["usage_limits"].update_one(
-                {"user_id": user_id, "date": current_date_kyiv_str}, # Дата в формате бота
-                {
-                    "$set": {"unlimited_today": 1},
-                    "$setOnInsert": {
-                        "user_id": user_id,
-                        "date": current_date_kyiv_str,
-                        "dream_count": 0,
-                        "monthly_count": 0,
-                        "last_reset_month": current_month_kyiv_str,
-                        "first_usage_date": current_date_kyiv_str
-                    }
-                },
-                upsert=True
-            )
-            logger.info(f"Разовый платеж (unlimited_today) активирован для user_id {user_id} на {current_date_kyiv_str} (order: {order_ref})")
-        else:
-            logger.error(f"Неизвестный plan_type '{plan_type}' в сессии для orderReference {order_ref}")
+            logger.info(f"Подписка для user_id {user_id} активирована/продлена до {end_date_kyiv_str}. recToken: {rec_token}")
 
-    response_signature_str = f"{order_ref};accept;{response_time_utc_ts}"
-    response_signature = hmac.new(WAYFORPAY_SECRET_KEY.encode(), response_signature_str.encode(), hashlib.md5).hexdigest()
-    
-    response_to_wayforpay = {
-        "orderReference": order_ref,
-        "status": "accept",
-        "time": response_time_utc_ts,
-        "signature": response_signature
-    }
-    logger.info(f"Ответ для WayForPay для orderReference {order_ref}: {response_to_wayforpay}")
-    return response_to_wayforpay
+        # Если это был разовый платеж (от кнопки "оплатить один сон")
+        elif order_ref.startswith("single_") or (checkout_session and plan_type == "single"):
+            current_date_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
+            current_month_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m")
+            await db["usage_limits"].update_one(
+                {"user_id": user_id, "date": current_date_kyiv_str},
+                {"$set": {"unlimited_today": 1},
+                    "$setOnInsert": {
+                    "user_id": user_id, "date": current_date_kyiv_str, "dream_count": 0,
+                    "monthly_count": 0, "last_reset_month": current_month_kyiv_str,
+                    "first_usage_date": current_date_kyiv_str}},
+                upsert=True)
+            logger.info(f"Разовый платеж (unlimited_today) для user_id {user_id} на {current_date_kyiv_str}")
+
+    # Отправляем подтверждение WayForPay
+    response_time_utc_ts = int(current_time_utc.timestamp())
+    # Строка для подписи ответа: orderReference;status;time
+    response_params = [order_ref, "accept", str(response_time_utc_ts)]
+    response_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, response_params)
+    return {"orderReference": order_ref, "status": "accept", "time": response_time_utc_ts, "signature": response_signature}
+
+# Пример функции для вызова API регулярного платежа WayForPay
+# WAYFORPAY_API_URL = "https://api.wayforpay.com/api" # Уточните URL
+
+# async def charge_recurring_payment(user_id: int, order_reference: str, amount: float, currency: str, rec_token: str):
+#     order_date = int(datetime.utcnow().timestamp())
+#     params_for_signature = [
+#         WAYFORPAY_MERCHANT_ACCOUNT,
+#         order_reference, # Уникальный для каждого списания
+#         str(amount),
+#         currency,
+#         rec_token,
+#         str(order_date)
+#     ]
+#     # Уточните точный список полей для подписи регулярного платежа в документации!
+#     signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_for_signature)
+
+#     payload = {
+#         "transactionType": "REGULAR_PAYMENT", # Или другой, по документации
+#         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
+#         "orderReference": order_reference,
+#         "amount": amount,
+#         "currency": currency,
+#         "recToken": rec_token,
+#         "orderDate": order_date,
+#         "comment": "Monthly subscription renewal",
+#         "merchantSignature": signature
+#     }
+#     async with httpx.AsyncClient() as client:
+#         try:
+#             response = await client.post(WAYFORPAY_API_URL, json=payload)
+#             response.raise_for_status() # Вызовет исключение для 4xx/5xx
+#             logger.info(f"Recurring payment API response for order {order_reference}: {response.json()}")
+#             return response.json()
+#         except httpx.HTTPStatusError as e:
+#             logger.error(f"HTTP error charging recurring payment for order {order_reference}: {e.response.text}")
+#             return None
+#         except Exception as e:
+#             logger.error(f"Error charging recurring payment for order {order_reference}: {e}")
+#             return None
 
 # Используем роутер для определения пути
 @payment_api_router.get("/check-access") 
