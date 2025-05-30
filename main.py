@@ -60,7 +60,7 @@ async def create_checkout_session(session: CheckoutSession):
         # Этот эндпоинт теперь только для инициации подписки
         raise HTTPException(status_code=400, detail="Invalid plan_type for this endpoint, only 'subscription' allowed.")
 
-    amount = 300 # Сумма первого платежа и последующих регулярных
+    amount = 1 # Сумма первого платежа и последующих регулярных
     order_ref = f"sub_{session.user_id}_{int(datetime.utcnow().timestamp())}" # "sub" для подписки
     order_date = int(datetime.utcnow().timestamp())
 
