@@ -80,37 +80,35 @@ async def create_checkout_session(session: CheckoutSession):
         "1", # Количество
         str(amount) # Цена
     ]
-    # ... (код выше) ...
+    # 🔴 ВАЖНО: Список полей и их ПОРЯДОК ДОЛЖЕН ТОЧНО СООТВЕТСТВОВАТЬ
+    # 🔴 документации WayForPay для метода Purchase с регулярными платежами!
+    # 🔴 Это ПРИМЕРНЫЙ порядок, основанный на стандартной логике. ПРОВЕРЬТЕ!
+    params_for_signature = [
+        WAYFORPAY_MERCHANT_ACCOUNT,
+        WAYFORPAY_DOMAIN,
+        order_ref,
+        str(order_date),
+        str(amount),
+        "UAH",
+        "AI Dream Analysis (Subscription)", # productName[0]
+        "1", # productCount[0]
+        str(amount), # productPrice[0]
+        # Добавляем параметры регулярного платежа (в ПРАВИЛЬНОМ ПОРЯДКЕ!)
+        str(amount), # regularAmount
+        "month",     # regularMode
+        "1",         # regularInterval
+        "0",         # regularCount (0 = неограниченно)
+        regular_start_date_str # regularStartDate
+        # 🔴 Убедитесь, что clientAccountId и другие поля не должны быть здесь!
+        # 🔴 Обычно, поля client* не участвуют в подписи SimpleSignature.
+    ]
+    # Используем правильную функцию подписи (hex)
+    merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_for_signature)
 
-# 🔴 ВАЖНО: Список полей и их ПОРЯДОК ДОЛЖЕН ТОЧНО СООТВЕТСТВОВАТЬ
-# 🔴 документации WayForPay для метода Purchase с регулярными платежами!
-# 🔴 Это ПРИМЕРНЫЙ порядок, основанный на стандартной логике. ПРОВЕРЬТЕ!
-params_for_signature = [
-    WAYFORPAY_MERCHANT_ACCOUNT,
-    WAYFORPAY_DOMAIN,
-    order_ref,
-    str(order_date),
-    str(amount),
-    "UAH",
-    "AI Dream Analysis (Subscription)", # productName[0]
-    "1", # productCount[0]
-    str(amount), # productPrice[0]
-    # Добавляем параметры регулярного платежа (в ПРАВИЛЬНОМ ПОРЯДКЕ!)
-    str(amount), # regularAmount
-    "month",     # regularMode
-    "1",         # regularInterval
-    "0",         # regularCount (0 = неограниченно)
-    regular_start_date_str # regularStartDate
-    # 🔴 Убедитесь, что clientAccountId и другие поля не должны быть здесь!
-    # 🔴 Обычно, поля client* не участвуют в подписи SimpleSignature.
-]
-# Используем правильную функцию подписи (hex)
-merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_for_signature)
+    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
+    frontend_url_for_return = os.getenv('FRONTEND_URL', 'https://dreamcatcher.guru')
 
-base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
-frontend_url_for_return = os.getenv('FRONTEND_URL', 'https://dreamcatcher.guru')
-
-payment_form_data = {
+    payment_form_data = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
         "merchantAuthType": "SimpleSignature",
         "merchantDomainName": WAYFORPAY_DOMAIN,
@@ -136,7 +134,6 @@ payment_form_data = {
         "regularInterval": "1"        # Интервал (1 месяц)
     }
     logger.info(f"Данные формы для WayForPay (регулярный): {payment_form_data}")
-
     await db["checkout_sessions"].insert_one({
         "orderReference": order_ref,
         "user_id": int(session.user_id),
