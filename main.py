@@ -32,16 +32,30 @@ db = mongo_client["dream_database"]
 app = FastAPI()
 payment_api_router = APIRouter(prefix="/api/pay")
 
+# ❗ ПРОВЕРИТЬ/НАСТРОИТЬ: Убедитесь, что эти URL точны
+# Запрос приходит с 'https://www.dreamcatcher.guru'
+FRONTEND_DOMAIN_WWW = "https://www.dreamcatcher.guru" # <--- 🟢 ДОБАВЛЕНО 'www.'
+FRONTEND_DOMAIN_NO_WWW = "https://dreamcatcher.guru" # На всякий случай, если иногда без www
+BACKEND_DOMAIN = "https://payapi.dreamcatcher.guru" # Если ваш API на другом поддомене
+
+# Возможные источники для тестирования, включая локальные
+origins = [
+    FRONTEND_DOMAIN_WWW,    # <--- 🟢 ИСПОЛЬЗУЕМ С 'www.'
+    FRONTEND_DOMAIN_NO_WWW, # <--- Добавьте и без 'www.', если это возможно
+    BACKEND_DOMAIN,         # Только если API и фронтенд на разных доменах/поддоменах и нужны взаимные запросы
+    # "http://localhost",
+    # "http://127.0.0.1",
+    # "http://localhost:xxxx", # Замените xxxx на порт, если тестируете локально фронтенд
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://dreamcatcher.guru", 
-        "https://payapi.dreamcatcher.guru" 
-        # Можно добавить "http://localhost:xxxx" для локального тестирования HTML-страницы, если нужно
-    ],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"], 
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"],
     allow_headers=["*"], 
+    expose_headers=["*"],
+    max_age=600
 )
 
 class CheckoutSession(BaseModel):
