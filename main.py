@@ -115,21 +115,64 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
         "1",                    # productCount[0]
         str(amount)             # productPrice[0]
     ]
-    
+
+    widget_params_to_send = {
+        "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
+        "merchantDomainName": WAYFORPAY_DOMAIN,
+        "authorizationType": "SimpleSignature",
+        # merchantSignature будет добавлен позже
+        "orderReference": order_ref,
+        "orderDate": str(order_date),
+        "amount": str(amount),
+        "currency": "UAH",
+        "productName": [product_name_str],
+        "productPrice": [str(amount)],
+        "productCount": ["1"],
+        "language": request_data.lang.upper() if request_data.lang and request_data.lang.upper() in ["UA", "RU", "EN"] else "UA",
+        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook",
+        
+        "clientFirstName": request_data.client_first_name or "N/A", # 🟢 Или реальные данные от бота
+        "clientLastName": request_data.client_last_name or "N/A",   # 🟢
+        "clientEmail": request_data.client_email or f"user_{user_id_str}@example.com", # 🟢 Должен быть валидный email
+        "clientPhone": request_data.client_phone or "380000000000"    # 🟢 Должен быть валидный телефон
+    }
+
     if plan_type == "subscription":
         today_date_obj = date.today()
         next_month_date = today_date_obj + relativedelta(months=1) 
         regular_start_date_str = next_month_date.strftime("%Y-%m-%d")
     
-    signature_params_list.extend([
-        str(amount), # regularAmount
-        "month",     # regularMode
-        "1",         # regularInterval
-        "0",         # regularCount (0 = неограниченно)
-        regular_start_date_str # regularStartDate
-        ])
+    widget_params_to_send.update({
+            "regularMode": "month",
+            "regularAmount": str(amount), 
+            "regularCount": "0",          
+            "regularStartDate": regular_start_date_str,
+            "regularInterval": "1"        
+        })
+
+        # 🟢 ЕСЛИ ПЕРЕДАЕМ REGULAR-ПАРАМЕТРЫ, ОНИ ДОЛЖНЫ БЫТЬ В ПОДПИСИ!
+        # 🔴 УТОЧНИТЕ ПОРЯДОК В ДОКУМЕНТАЦИИ WAYFORPAY ДЛЯ PURCHASE С РЕКУРРЕНТАМИ!
+        # Это ПРЕДПОЛОЖИТЕЛЬНЫЙ порядок, их нужно добавить к `signature_params_list` выше.
+        # Пример добавления (ПОРЯДОК ВАЖЕН И ДОЛЖЕН БЫТЬ ПРОВЕРЕН):
+        # signature_params_list.extend([
+        #     request_data.client_first_name or "N/A", # clientFirstName (если он в подписи)
+        #     request_data.client_last_name or "N/A",  # clientLastName (если он в подписи)
+        #     request_data.client_phone or "380000000000", # clientPhone (если он в подписи)
+        #     request_data.client_email or f"user_{user_id_str}@example.com", # clientEmail (если он в подписи)
+        #     # ... ДРУГИЕ ПОЛЯ, если они есть в подписи для Purchase...
+        #     str(amount), # regularAmount (возможно, эти regular-поля идут позже)
+        #     "month",     # regularMode
+        #     "1",         # regularInterval
+        #     "0",         # regularCount
+        #     regular_start_date_str # regularStartDate
+        # ])
+        # 🔴 НА ДАННЫЙ МОМЕНТ Я НЕ ВКЛЮЧАЮ ИХ В ПОДПИСЬ, ТАК КАК ТОЧНЫЙ ПОРЯДОК НЕИЗВЕСТЕН.
+        # 🔴 ЕСЛИ WAYFORPAY ТРЕБУЕТ ИХ В ПОДПИСИ ДЛЯ ВИДЖЕТА С REGULAR ПАРАМЕТРАМИ, ПЛАТЕЖ НЕ ПРОЙДЕТ.
 
     merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, signature_params_list)
+    widget_params_to_send["merchantSignature"] = merchant_signature # Добавляем подпись в параметры для виджета
+
+    logger.info(f"Финальные параметры для виджета WayForPay (с подписью): {widget_params_to_send}")
 
     base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru') # ❗ ПРОВЕРИТЬ/НАСТРОИТЬ
 
@@ -180,15 +223,16 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
 
     await db["payment_attempts"].insert_one({
         "orderReference": order_ref,
-        "user_id": user_id_int,
+        "user_id": int(user_id_str),
         "plan_type": plan_type,
         "amount": amount,
         "status": "widget_params_generated",
         "created_utc": datetime.utcnow(),
-        "widget_request_data": request_data.model_dump()
+        "widget_request_data": request_data.model_dump(),
+        "sent_to_wfp_params": widget_params_to_send # Логируем то, что отправляем
     })
     
-    return widget_params
+    return widget_params_to_send
 
 @payment_api_router.post("/wayforpay-webhook")
 async def wayforpay_webhook(request: Request):
