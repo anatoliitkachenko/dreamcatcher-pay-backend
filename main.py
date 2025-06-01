@@ -156,10 +156,10 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
         
         regular_params_for_widget = {
             "regularMode": "month",
-            "regularAmount": str(amount), 
-            "regularCount": "12",          
+            # "regularAmount": str(amount), 
+            # "regularCount": "12",          
             "regularStartDate": regular_start_date_str, # <--- Используем дату в ПРАВИЛЬНОМ формате
-            "regularInterval": "1"        
+            # "regularInterval": "1"        
         }
         widget_params_to_send.update(regular_params_for_widget)
 
