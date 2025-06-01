@@ -129,9 +129,11 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
     # Параметры, которые будут переданы в виджет
     widget_params_to_send = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
-        "merchantDomainName": WAYFORPAY_DOMAIN,
         "merchantAuthType": "SimpleSignature",
+        "merchantDomainName": WAYFORPAY_DOMAIN,
         "merchantSignature": merchant_signature, # Используем "простую" подпись
+        "language": request_data.lang.upper() if request_data.lang and request_data.lang.upper() in ["UA", "RU", "EN"] else "UA",
+        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook",
         "orderReference": order_ref,
         "orderDate": str(order_date),
         "amount": str(amount),
@@ -139,9 +141,6 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
         "productName": [product_name_str],
         "productPrice": [str(amount)],
         "productCount": ["1"],
-        "language": request_data.lang.upper() if request_data.lang and request_data.lang.upper() in ["UA", "RU", "EN"] else "UA",
-        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook",
-        
         "clientFirstName": request_data.client_first_name or "N/A",
         "clientLastName": request_data.client_last_name or "N/A",
         "clientEmail": request_data.client_email or f"user_{user_id_str}@example.com",
