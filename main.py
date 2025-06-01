@@ -78,8 +78,9 @@ def make_wayforpay_signature(secret_key: str, params_list: List[str]) -> str:
     # Для большинства API WayForPay подпись HMAC-MD5 в hex-формате
     return hmac.new(secret_key.encode(), sign_str.encode(), hashlib.md5).hexdigest()
 
-@payment_api_router.post("/get-widget-params") # Имя эндпоинта изменено
-async def get_widget_payment_params(request_data: WidgetParamsRequest): # Используем новую модель
+# main.py - предлагаемые исправления
+@payment_api_router.post("/get-widget-params")
+async def get_widget_payment_params(request_data: WidgetParamsRequest):
     logger.info(f"Запрос на параметры для виджета (/api/pay/get-widget-params): {request_data}")
 
     user_id_str = request_data.user_id
@@ -93,7 +94,7 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest): # Исп
         product_name_str = "AI Dream Analysis (Subscription)"
         order_ref_prefix = "widget_sub"
     elif plan_type == "single":
-        amount = 40 # ❗ Цена для разового анализа, если отличается от подписки
+        amount = 40
         product_name_str = "AI Dream Analysis (Single)"
         order_ref_prefix = "widget_single"
     else:
@@ -101,98 +102,66 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest): # Исп
         raise HTTPException(status_code=400, detail="Invalid plan_type. Allowed: 'subscription', 'single'.")
 
     order_ref = f"{order_ref_prefix}_{user_id_str}_{int(datetime.utcnow().timestamp())}"
-    order_date = int(datetime.utcnow().timestamp()) # Timestamp
+    order_date = int(datetime.utcnow().timestamp())
+    
+    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
 
-    # 🟢 DEFINE base_backend_url BEFORE its first use
-    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru') # ❗ ПРОВЕРЬТЕ, что BACKEND_URL_BASE в .env правильный
-
-    # Параметры для строки подписи виджета
+    # 1. Упрощаем signature_params_list до базовых полей (согласно документации API Purchase)
     signature_params_list = [
         WAYFORPAY_MERCHANT_ACCOUNT,
-        WAYFORPAY_DOMAIN,       # Это ваш merchantDomainName
+        WAYFORPAY_DOMAIN,
         order_ref,
         str(order_date),
         str(amount),
-        "UAH",                  # Валюта
-        product_name_str,       # productName[0]
-        "1",                    # productCount[0]
-        str(amount)             # productPrice[0]
+        "UAH",
+        product_name_str,   # productName[0]
+        "1",                # productCount[0]
+        str(amount)         # productPrice[0]
     ]
     
-    client_first_name_val = request_data.client_first_name or "N/A" #
-    client_last_name_val = request_data.client_last_name or "N/A" #
-    client_email_val = request_data.client_email or f"user_{user_id_str}@example.com" #
-    client_phone_val = request_data.client_phone or "380000000000" #
-
-    signature_params_list.extend([
-        client_first_name_val,
-        client_last_name_val,
-        client_email_val,
-        client_phone_val
-    ])
+    # Логируем строку, которая будет подписана
+    string_to_sign = ';'.join(str(x) for x in signature_params_list)
+    logger.info(f"Строка для подписи (String to sign): {string_to_sign}")
     
-    # Временный словарь для параметров регулярных платежей
-    regular_params_dict = {}
-    if plan_type == "subscription": #
-        today_date_obj = date.today() #
-        next_month_date = today_date_obj + relativedelta(months=1) #
-        regular_start_date_str = next_month_date.strftime("%d.%m.%Y") 
-        
-        regular_params_dict = { #
-            "regularMode": "month", #
-            "regularAmount": str(amount), #
-            "regularCount": "0", #
-            "regularStartDate": regular_start_date_str, #
-            "regularInterval": "1" #
-        }
-        
-        # Экспериментальное добавление параметров регулярных платежей в подпись.
-        # Предполагаемый порядок: ...clientPhone;regularMode;regularAmount;regularCount;regularStartDate;regularInterval
-        # Добавляем их ПОСЛЕ клиентских данных, если это подписка.
-        signature_params_list.extend([
-            regular_params_dict["regularMode"],
-            regular_params_dict["regularAmount"],
-            regular_params_dict["regularCount"],
-            regular_params_dict["regularStartDate"],
-            regular_params_dict["regularInterval"]
-        ])
     merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, signature_params_list)
+    logger.info(f"Сгенерированная подпись: {merchant_signature}")
 
     # Параметры, которые будут переданы в виджет
     widget_params_to_send = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
         "merchantDomainName": WAYFORPAY_DOMAIN,
         "authorizationType": "SimpleSignature",
-        "merchantSignature": merchant_signature, # Подпись добавляется здесь
+        "merchantSignature": merchant_signature, # Используем "простую" подпись
         "orderReference": order_ref,
         "orderDate": str(order_date),
         "amount": str(amount),
         "currency": "UAH",
-        "productName": [product_name_str],    # Массив
-        "productPrice": [str(amount)],       # Массив
-        "productCount": ["1"],               # Массив
+        "productName": [product_name_str],
+        "productPrice": [str(amount)],
+        "productCount": ["1"],
         "language": request_data.lang.upper() if request_data.lang and request_data.lang.upper() in ["UA", "RU", "EN"] else "UA",
-        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook", # Теперь base_backend_url определен
+        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook",
         
         "clientFirstName": request_data.client_first_name or "N/A",
         "clientLastName": request_data.client_last_name or "N/A",
-        "clientEmail": request_data.client_email or f"user_{user_id_str}@example.com", # Должен быть валидный формат email
-        "clientPhone": request_data.client_phone or "380000000000" # Должен быть валидный формат телефона
+        "clientEmail": request_data.client_email or f"user_{user_id_str}@example.com",
+        "clientPhone": request_data.client_phone or "380000000000"
     }
 
     if plan_type == "subscription":
-        today_date_obj = date.today() # Убедитесь, что 'from datetime import date' есть
-        # Убедитесь, что 'from dateutil.relativedelta import relativedelta' есть
-        next_month_date = today_date_obj + relativedelta(months=1) 
-        regular_start_date_str = next_month_date.strftime("%Y-%m-%d")
+        today_date_obj = date.today()
+        next_month_date = today_date_obj + relativedelta(months=1)
+        # 2. ИСПРАВЛЯЕМ ФОРМАТ ДАТЫ для regularStartDate на ДД.ММ.ГГГГ
+        regular_start_date_str = next_month_date.strftime("%d.%m.%Y") 
         
-        widget_params_to_send.update({
+        regular_params_for_widget = {
             "regularMode": "month",
             "regularAmount": str(amount), 
             "regularCount": "0",          
-            "regularStartDate": regular_start_date_str,
+            "regularStartDate": regular_start_date_str, # <--- Используем дату в ПРАВИЛЬНОМ формате
             "regularInterval": "1"        
-        })
+        }
+        widget_params_to_send.update(regular_params_for_widget)
 
     logger.info(f"Финальные параметры для виджета WayForPay (с подписью): {widget_params_to_send}")
     
@@ -200,23 +169,17 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest): # Исп
         user_id_int = int(user_id_str)
     except ValueError:
         logger.error(f"Неверный user_id '{user_id_str}' для сохранения в payment_attempts.")
-        # Не выбрасываем HTTPException здесь, чтобы CORS-заголовки успели установиться,
-        # но виджет получит некорректные параметры, если user_id критичен для него.
-        # Однако, user_id для WayForPay передается через orderReference.
-        # Проблема будет, если user_id не число для записи в вашу БД.
-        # Лучше валидировать user_id на входе в Pydantic модели, если он всегда должен быть int.
         raise HTTPException(status_code=400, detail="Invalid user_id format for database.")
-
 
     await db["payment_attempts"].insert_one({
         "orderReference": order_ref,
-        "user_id": user_id_int, # Используем преобразованный user_id_int
+        "user_id": user_id_int,
         "plan_type": plan_type,
         "amount": amount,
         "status": "widget_params_generated",
         "created_utc": datetime.utcnow(),
         "widget_request_data": request_data.model_dump(),
-        "sent_to_wfp_params": widget_params_to_send # Логируем то, что будет отправлено в виджет
+        "sent_to_wfp_params": widget_params_to_send
     })
     
     return widget_params_to_send
