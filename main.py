@@ -234,147 +234,124 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
     
     return widget_params_to_send
 
-@payment_api_router.post("/wayforpay-webhook")
-async def wayforpay_webhook(request: Request):
-    data = await request.json()
-    logger.info(f"Получен вебхук от WayForPay (/api/pay/wayforpay-webhook): {data}")
+@payment_api_router.post("/get-widget-params") # Имя эндпоинта изменено
+async def get_widget_payment_params(request_data: WidgetParamsRequest): # Используем новую модель
+    logger.info(f"Запрос на параметры для виджета (/api/pay/get-widget-params): {request_data}")
+
+    user_id_str = request_data.user_id
+    plan_type = request_data.plan_type
     
-    received_signature = data.get("merchantSignature")
-    order_ref = data.get("orderReference")
+    product_name_str = ""
+    amount = 0
 
-    sign_fields_webhook = [
-        data.get("merchantAccount"),
-        data.get("orderReference"),
-        data.get("amount"),
-        data.get("currency"),
-        data.get("authCode"),
-        data.get("cardPan"),
-        data.get("transactionStatus"),
-        data.get("reasonCode")
-]
+    if plan_type == "subscription":
+        amount = 300 
+        product_name_str = "AI Dream Analysis (Subscription)"
+        order_ref_prefix = "widget_sub"
+    elif plan_type == "single":
+        amount = 40 # ❗ Цена для разового анализа, если отличается от подписки
+        product_name_str = "AI Dream Analysis (Single)"
+        order_ref_prefix = "widget_single"
+    else:
+        logger.error(f"Invalid plan_type '{plan_type}' received for widget params.")
+        raise HTTPException(status_code=400, detail="Invalid plan_type. Allowed: 'subscription', 'single'.")
 
-    sign_fields_webhook_clean = [str(f) for f in sign_fields_webhook if f is not None]
+    order_ref = f"{order_ref_prefix}_{user_id_str}_{int(datetime.utcnow().timestamp())}"
+    order_date = int(datetime.utcnow().timestamp()) # Timestamp
 
-    webhook_signature_string = ';'.join(sign_fields_webhook_clean)
-    # Для вебхуков обычно используется make_wayforpay_signature (с hexdigest)
-    calculated_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, sign_fields_webhook_clean)
+    # 🟢 DEFINE base_backend_url BEFORE its first use
+    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru') # ❗ ПРОВЕРЬТЕ, что BACKEND_URL_BASE в .env правильный
 
-    if calculated_signature != received_signature:
-        logger.error(f"Неверная подпись вебхука для orderReference {order_ref}. String: {webhook_signature_string}, Calc: {calculated_signature}, Recv: {received_signature}")
-        raise HTTPException(status_code=400, detail="Invalid webhook signature")
-
-    logger.info(f"Подпись вебхука для orderReference {order_ref} верна.")
-
-    transaction_status = data.get("transactionStatus")
-    user_id_from_client_account_id_str = data.get("clientAccountId")
-    rec_token = data.get("recToken") 
-
-    current_time_utc = datetime.utcnow()
-    tz_kyiv = timezone('Europe/Kyiv')
-
-    user_id_to_process = None
-
-    if user_id_from_client_account_id_str:
-        try:
-            user_id_to_process = int(user_id_from_client_account_id_str)
-            logger.info(f"User ID {user_id_to_process} получен из clientAccountId.")
-        except ValueError:
-            logger.error(f"Не удалось преобразовать clientAccountId '{user_id_from_client_account_id_str}' в int.")
-            user_id_to_process = None 
+    # Параметры для строки подписи виджета
+    signature_params_list = [
+        WAYFORPAY_MERCHANT_ACCOUNT,
+        WAYFORPAY_DOMAIN,       # Это ваш merchantDomainName
+        order_ref,
+        str(order_date),
+        str(amount),
+        "UAH",                  # Валюта
+        product_name_str,       # productName[0]
+        "1",                    # productCount[0]
+        str(amount)             # productPrice[0]
+    ]
     
-    if user_id_to_process is None and order_ref:
-        try:
-            parts = order_ref.split('_')
-            if len(parts) >= 3 and parts[0] == "widget" and (parts[1] == "sub" or parts[1] == "single"):
-                user_id_to_process = int(parts[2]) 
-                logger.info(f"User ID {user_id_to_process} извлечен из orderReference: {order_ref}")
-            else:
-                logger.warning(f"Не удалось извлечь user_id из orderReference: {order_ref}. Неверный формат префикса или недостаточно частей.")
-        except (ValueError, IndexError) as e:
-            logger.error(f"Ошибка извлечения user_id из orderReference {order_ref}: {e}")
-            user_id_to_process = None 
+    # ❗ ВАЖНО ДЛЯ ПОДПИСОК (АВТОСПИСАНИЯ):
+    # Если вы передаете 'regularMode', 'regularAmount' и т.д. в виджет,
+    # эти параметры ТАКЖЕ ДОЛЖНЫ участвовать в формировании 'merchantSignature'
+    # в ТОЧНОМ ПОРЯДКЕ, указанном в документации WayForPay для метода Purchase с рекуррентами.
+    # Сейчас я их НЕ добавляю в 'signature_params_list' для простоты и потому что точный порядок
+    # для всех этих полей вместе не был предоставлен в документации к виджету.
+    # Если WayForPay будет требовать их в подписи, платеж через виджет не пройдет (ошибка WayForPay).
+    # Сначала добейтесь работы без regular-параметров в ПОДПИСИ, но передавая их в виджет.
+    # WayForPay должен создать recToken при успешной первой оплате, если ваш мерчант-аккаунт это поддерживает.
 
-    if not user_id_to_process:
-        logger.error(f"Критическая ошибка: Не удалось определить user_id ни из clientAccountId, ни из orderReference ({order_ref}). Платеж не может быть присвоен пользователю.")
-        response_time_utc_ts = int(current_time_utc.timestamp())
-        response_params = [order_ref, "accept", str(response_time_utc_ts)]
-        response_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, response_params)
-        return {"orderReference": order_ref, "status": "accept", "time": response_time_utc_ts, "signature": response_signature}
+    merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, signature_params_list)
 
-    user_id = user_id_to_process 
-    
-    await db["payment_attempts"].update_one( 
-        {"orderReference": order_ref},
-        {"$set": {
-            "user_id": user_id, 
-            "status": transaction_status, 
-            "webhook_received_utc": current_time_utc, 
-            "webhook_data": data
-        }},
-        upsert=True 
-    )
-
-    if transaction_status == "Approved":
-        plan_type_from_order_ref = None
-        if order_ref.startswith("widget_sub_"):
-            plan_type_from_order_ref = "subscription"
-        elif order_ref.startswith("widget_single_"):
-            plan_type_from_order_ref = "single"
+    # Параметры, которые будут переданы в виджет
+    widget_params_to_send = {
+        "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
+        "merchantDomainName": WAYFORPAY_DOMAIN,
+        "authorizationType": "SimpleSignature",
+        "merchantSignature": merchant_signature, # Подпись добавляется здесь
+        "orderReference": order_ref,
+        "orderDate": str(order_date),
+        "amount": str(amount),
+        "currency": "UAH",
+        "productName": [product_name_str],    # Массив
+        "productPrice": [str(amount)],       # Массив
+        "productCount": ["1"],               # Массив
+        "language": request_data.lang.upper() if request_data.lang and request_data.lang.upper() in ["UA", "RU", "EN"] else "UA",
+        "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook", # Теперь base_backend_url определен
         
-        if not plan_type_from_order_ref:
-            payment_attempt_doc = await db["payment_attempts"].find_one({"orderReference": order_ref, "user_id": user_id})
-            plan_type_from_order_ref = payment_attempt_doc.get("plan_type") if payment_attempt_doc else None
-            if payment_attempt_doc:
-                logger.info(f"plan_type '{plan_type_from_order_ref}' взят из payment_attempts для orderReference {order_ref}")
-            else:
-                logger.error(f"Запись payment_attempts не найдена для orderReference {order_ref} и user_id {user_id}")
+        # Обязательные клиентские данные для виджета (используем заглушки, если нет реальных данных)
+        "clientFirstName": request_data.client_first_name or "N/A",
+        "clientLastName": request_data.client_last_name or "N/A",
+        "clientEmail": request_data.client_email or f"user_{user_id_str}@example.com", # Должен быть валидный формат email
+        "clientPhone": request_data.client_phone or "380000000000" # Должен быть валидный формат телефона
+    }
 
+    # Добавление параметров для регулярных платежей (если это подписка)
+    # Эти параметры нужны, чтобы WayForPay создал recToken
+    if plan_type == "subscription":
+        today_date_obj = date.today() # Убедитесь, что 'from datetime import date' есть
+        # Убедитесь, что 'from dateutil.relativedelta import relativedelta' есть
+        next_month_date = today_date_obj + relativedelta(months=1) 
+        regular_start_date_str = next_month_date.strftime("%Y-%m-%d")
+        
+        widget_params_to_send.update({
+            "regularMode": "month",
+            "regularAmount": str(amount), 
+            "regularCount": "0",          
+            "regularStartDate": regular_start_date_str,
+            "regularInterval": "1"        
+        })
 
-        if plan_type_from_order_ref == "subscription":
-            end_date_utc = current_time_utc + timedelta(days=30) 
-            end_date_kyiv_str = end_date_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
-            current_date_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
-
-            update_data = {
-                "user_id": user_id, "is_active": 1,
-                "subscription_start": current_date_kyiv_str,
-                "subscription_end": end_date_kyiv_str,
-                "cancel_requested": 0,
-                "plan_type": "subscription"
-            }
-            if rec_token:
-                update_data["recToken"] = rec_token
-                update_data["last_successful_charge_utc"] = current_time_utc
-            else:
-                logger.warning(f"recToken не получен для подписки user_id {user_id}, orderReference {order_ref}. Автосписания не будут работать.")
-
-            await db["subscriptions"].update_one(
-                {"user_id": user_id},
-                {"$set": update_data},
-                upsert=True
-            )
-            logger.info(f"Подписка для user_id {user_id} активирована/продлена до {end_date_kyiv_str}. recToken: {rec_token}")
-
-        elif plan_type_from_order_ref == "single":
-            current_date_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m-%d")
-            current_month_kyiv_str = current_time_utc.astimezone(tz_kyiv).strftime("%Y-%m")
-            await db["usage_limits"].update_one(
-                {"user_id": user_id, "date": current_date_kyiv_str},
-                {"$set": {"unlimited_today": 1},
-                "$setOnInsert": {
-                    "user_id": user_id, "date": current_date_kyiv_str, "dream_count": 0,
-                    "monthly_count": 0, "last_reset_month": current_month_kyiv_str,
-                    "first_usage_date": current_date_kyiv_str}},
-                upsert=True)
-            logger.info(f"Разовый платеж (unlimited_today) для user_id {user_id} на {current_date_kyiv_str} активирован.")
-        else:
-            logger.error(f"Не удалось определить plan_type для Approved orderReference {order_ref} и user_id {user_id}. Платеж не обработан как услуга.")
+    logger.info(f"Финальные параметры для виджета WayForPay (с подписью): {widget_params_to_send}")
     
-    response_time_utc_ts = int(current_time_utc.timestamp())
+    try:
+        user_id_int = int(user_id_str)
+    except ValueError:
+        logger.error(f"Неверный user_id '{user_id_str}' для сохранения в payment_attempts.")
+        # Не выбрасываем HTTPException здесь, чтобы CORS-заголовки успели установиться,
+        # но виджет получит некорректные параметры, если user_id критичен для него.
+        # Однако, user_id для WayForPay передается через orderReference.
+        # Проблема будет, если user_id не число для записи в вашу БД.
+        # Лучше валидировать user_id на входе в Pydantic модели, если он всегда должен быть int.
+        raise HTTPException(status_code=400, detail="Invalid user_id format for database.")
 
-    response_params = [order_ref, "accept", str(response_time_utc_ts)]
-    response_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, response_params)
-    return {"orderReference": order_ref, "status": "accept", "time": response_time_utc_ts, "signature": response_signature}
+
+    await db["payment_attempts"].insert_one({
+        "orderReference": order_ref,
+        "user_id": user_id_int, # Используем преобразованный user_id_int
+        "plan_type": plan_type,
+        "amount": amount,
+        "status": "widget_params_generated",
+        "created_utc": datetime.utcnow(),
+        "widget_request_data": request_data.model_dump(),
+        "sent_to_wfp_params": widget_params_to_send # Логируем то, что будет отправлено в виджет
+    })
+    
+    return widget_params_to_send
 
 @payment_api_router.get("/check-access") 
 async def check_access_endpoint(user_id: str): # Переименовал, чтобы не конфликтовать с функцией check_access из бота
