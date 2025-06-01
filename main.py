@@ -34,11 +34,14 @@ payment_api_router = APIRouter(prefix="/api/pay")
 
 app.add_middleware(
     CORSMiddleware,
-    # 🔴 Укажите здесь адрес, где будет жить ваш pay-helper.html или другие клиенты
-    allow_origins=["https://dreamcatcher.guru", "https://payapi.dreamcatcher.guru"],
+    allow_origins=[
+        "https://dreamcatcher.guru", 
+        "https://payapi.dreamcatcher.guru" 
+        # Можно добавить "http://localhost:xxxx" для локального тестирования HTML-страницы, если нужно
+    ],
     allow_credentials=True,
-    allow_methods=["POST", "GET"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"], 
+    allow_headers=["*"], 
 )
 
 class CheckoutSession(BaseModel):
