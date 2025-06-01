@@ -119,16 +119,43 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest): # Исп
         str(amount)             # productPrice[0]
     ]
     
-    # ❗ ВАЖНО ДЛЯ ПОДПИСОК (АВТОСПИСАНИЯ):
-    # Если вы передаете 'regularMode', 'regularAmount' и т.д. в виджет,
-    # эти параметры ТАКЖЕ ДОЛЖНЫ участвовать в формировании 'merchantSignature'
-    # в ТОЧНОМ ПОРЯДКЕ, указанном в документации WayForPay для метода Purchase с рекуррентами.
-    # Сейчас я их НЕ добавляю в 'signature_params_list' для простоты и потому что точный порядок
-    # для всех этих полей вместе не был предоставлен в документации к виджету.
-    # Если WayForPay будет требовать их в подписи, платеж через виджет не пройдет (ошибка WayForPay).
-    # Сначала добейтесь работы без regular-параметров в ПОДПИСИ, но передавая их в виджет.
-    # WayForPay должен создать recToken при успешной первой оплате, если ваш мерчант-аккаунт это поддерживает.
+    client_first_name_val = request_data.client_first_name or "N/A" #
+    client_last_name_val = request_data.client_last_name or "N/A" #
+    client_email_val = request_data.client_email or f"user_{user_id_str}@example.com" #
+    client_phone_val = request_data.client_phone or "380000000000" #
 
+    signature_params_list.extend([
+        client_first_name_val,
+        client_last_name_val,
+        client_email_val,
+        client_phone_val
+    ])
+    
+    # Временный словарь для параметров регулярных платежей
+    regular_params_dict = {}
+    if plan_type == "subscription": #
+        today_date_obj = date.today() #
+        next_month_date = today_date_obj + relativedelta(months=1) #
+        regular_start_date_str = next_month_date.strftime("%Y-%m-%d") #
+        
+        regular_params_dict = { #
+            "regularMode": "month", #
+            "regularAmount": str(amount), #
+            "regularCount": "0", #
+            "regularStartDate": regular_start_date_str, #
+            "regularInterval": "1" #
+        }
+        
+        # Экспериментальное добавление параметров регулярных платежей в подпись.
+        # Предполагаемый порядок: ...clientPhone;regularMode;regularAmount;regularCount;regularStartDate;regularInterval
+        # Добавляем их ПОСЛЕ клиентских данных, если это подписка.
+        signature_params_list.extend([
+            regular_params_dict["regularMode"],
+            regular_params_dict["regularAmount"],
+            regular_params_dict["regularCount"],
+            regular_params_dict["regularStartDate"],
+            regular_params_dict["regularInterval"]
+        ])
     merchant_signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, signature_params_list)
 
     # Параметры, которые будут переданы в виджет
@@ -147,15 +174,12 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest): # Исп
         "language": request_data.lang.upper() if request_data.lang and request_data.lang.upper() in ["UA", "RU", "EN"] else "UA",
         "serviceUrl": f"{base_backend_url}/api/pay/wayforpay-webhook", # Теперь base_backend_url определен
         
-        # Обязательные клиентские данные для виджета (используем заглушки, если нет реальных данных)
         "clientFirstName": request_data.client_first_name or "N/A",
         "clientLastName": request_data.client_last_name or "N/A",
         "clientEmail": request_data.client_email or f"user_{user_id_str}@example.com", # Должен быть валидный формат email
         "clientPhone": request_data.client_phone or "380000000000" # Должен быть валидный формат телефона
     }
 
-    # Добавление параметров для регулярных платежей (если это подписка)
-    # Эти параметры нужны, чтобы WayForPay создал recToken
     if plan_type == "subscription":
         today_date_obj = date.today() # Убедитесь, что 'from datetime import date' есть
         # Убедитесь, что 'from dateutil.relativedelta import relativedelta' есть
