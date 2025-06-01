@@ -136,7 +136,7 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest): # Исп
     if plan_type == "subscription": #
         today_date_obj = date.today() #
         next_month_date = today_date_obj + relativedelta(months=1) #
-        regular_start_date_str = next_month_date.strftime("%Y-%m-%d") #
+        regular_start_date_str = next_month_date.strftime("%d.%m.%Y") 
         
         regular_params_dict = { #
             "regularMode": "month", #
