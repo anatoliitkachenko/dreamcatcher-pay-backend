@@ -174,7 +174,7 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
 
     logger.info(f"Финальные параметры для виджета WayForPay (с подписью): {widget_params_to_send}")
 
-    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru') # ❗ ПРОВЕРИТЬ/НАСТРОИТЬ
+    base_backend_url = os.getenv('BACKEND_URL_BASE', 'https://payapi.dreamcatcher.guru')
 
     widget_params = {
         "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
