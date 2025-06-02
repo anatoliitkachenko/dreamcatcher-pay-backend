@@ -154,7 +154,7 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
         regular_start_date_str = next_month_date.strftime("%d.%m.%Y") 
         
         regular_params_for_widget = {
-            "regularMode": "month",
+            "regularMode": "monthly",
             "regularAmount": str(amount), 
             "regularCount": "12",          
             "regularStartDate": regular_start_date_str, # <--- Используем дату в ПРАВИЛЬНОМ формате
