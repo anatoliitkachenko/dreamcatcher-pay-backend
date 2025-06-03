@@ -2,13 +2,14 @@ import os
 import hmac
 import hashlib
 import base64
+import re
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI, Request, HTTPException, APIRouter 
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta, date
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -72,6 +73,28 @@ class WidgetParamsRequest(BaseModel):
     client_last_name: Optional[str] = None
     client_email: Optional[str] = None
     client_phone: Optional[str] = None
+
+class WayForPayServiceWebhook(BaseModel):
+    merchantAccount: str
+    orderReference: str
+    merchantSignature: str # Подпись от WayForPay, которую нужно проверить
+    amount: float
+    currency: str
+    authCode: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    createdDate: Optional[int] = None # В примере ответа на CHECK_STATUS это int, в примере serviceUrl webhook - тоже
+    processingDate: Optional[int] = None
+    cardPan: Optional[str] = None
+    cardType: Optional[str] = None
+    issuerBankCountry: Optional[str] = None # В примере ответа на CHECK_STATUS это строка "UA", в serviceUrl webhook "980"
+    issuerBankName: Optional[str] = None
+    recToken: Optional[str] = None
+    transactionStatus: str
+    reason: Optional[str] = None # В примере serviceUrl это int (5105), в CHECK_STATUS - строка "Ok"
+    reasonCode: Union[int, str] # В примере serviceUrl это пустая строка, в CHECK_STATUS - int (1100)
+    fee: Optional[float] = None
+    paymentSystem: Optional[str] = None
 
 def make_wayforpay_signature(secret_key: str, params_list: List[str]) -> str:
     sign_str = ';'.join(str(x) for x in params_list)
@@ -203,5 +226,159 @@ async def check_access_endpoint(user_id: str): # Переименовал, чт�
     logger.info(f"Доступ неактивен для user_id {user_id_int} через /api/pay/check-access. Данные подписки: {sub}")
     return {"active": False}
 
-# Включаем роутер в основное приложение FastAPI
+# --- Функция для генерации подписи ответа вашего serviceUrl для WayForPay ---
+def make_service_response_signature(secret_key: str, order_reference: str, status: str, time_unix: int) -> str:
+    sign_str = f"{order_reference};{status};{str(time_unix)}"
+    logger.info(f"Service URL response string to sign: '{sign_str}'")
+    signature = hmac.new(secret_key.encode(), sign_str.encode(), hashlib.md5).hexdigest()
+    logger.info(f"Service URL response generated signature: '{signature}'")
+    return signature
+
+def verify_service_webhook_signature(secret_key: str, data: WayForPayServiceWebhook) -> bool:
+    auth_code_for_sig = data.authCode if data.authCode is not None else ""
+    card_pan_for_sig = data.cardPan if data.cardPan is not None else ""
+    # reasonCode может быть int или str, приводим к строке для единообразия
+    reason_code_for_sig = str(data.reasonCode) if data.reasonCode is not None else ""
+
+
+    fields_for_signature_check = [
+        data.merchantAccount,
+        data.orderReference,
+        str(data.amount), 
+        data.currency,
+        auth_code_for_sig,
+        card_pan_for_sig,
+        data.transactionStatus,
+        reason_code_for_sig 
+    ]
+    
+    sign_str_to_check = ';'.join(fields_for_signature_check)
+    expected_signature = hmac.new(secret_key.encode(), sign_str_to_check.encode(), hashlib.md5).hexdigest()
+    
+    logger.info(f"Verifying service webhook signature. String: '{sign_str_to_check}', Expected: '{expected_signature}', Received: '{data.merchantSignature}'")
+    if expected_signature == data.merchantSignature:
+        logger.info(f"Service webhook signature VERIFIED for OrderRef: {data.orderReference}")
+        return True
+    else:
+        logger.error(f"!!! Service webhook signature MISMATCH for OrderRef: {data.orderReference} !!!")
+        return False
+
+# --- Эндпоинт для приема веб-хуков от WayForPay ---
+@payment_api_router.post("/wayforpay-webhook", include_in_schema=False) # Скрываем из OpenAPI схемы
+async def wayforpay_webhook_handler(webhook_data: WayForPayServiceWebhook):
+    logger.info(f"Webhook received from WayForPay: {webhook_data.model_dump_json(indent=2)}")
+
+    if not verify_service_webhook_signature(WAYFORPAY_SECRET_KEY, webhook_data):
+        logger.error(f"CRITICAL: Invalid signature in webhook from WayForPay! OrderRef: {webhook_data.orderReference}. Data will not be processed.")
+        # Формируем стандартный "ОК" ответ для WayForPay, чтобы прекратить повторные отправки.
+        response_time_unix = int(datetime.utcnow().timestamp())
+        response_sig = make_service_response_signature(WAYFORPAY_SECRET_KEY, webhook_data.orderReference, "accept", response_time_unix)
+        return {"orderReference": webhook_data.orderReference, "status": "accept", "time": response_time_unix, "signature": response_sig}
+    # Если раскомментируете проверку выше, дальнейший код будет выполняться только при верной подписи.
+
+    # Извлечение telegram_user_id из orderReference
+    match = re.search(r"_(?P<user_id>\d+)_", webhook_data.orderReference)
+    if not match:
+        logger.error(f"Could not extract user_id from orderReference: {webhook_data.orderReference}")
+        response_time_unix = int(datetime.utcnow().timestamp())
+        response_sig = make_service_response_signature(WAYFORPAY_SECRET_KEY, webhook_data.orderReference, "accept", response_time_unix)
+        return {"orderReference": webhook_data.orderReference, "status": "accept", "time": response_time_unix, "signature": response_sig}
+
+    telegram_user_id = int(match.group("user_id"))
+
+    # Обновляем запись о попытке платежа (или создаем, если это первый веб-хук по этому orderReference)
+    await db["payment_attempts"].update_one(
+        {"orderReference": webhook_data.orderReference},
+        {"$set": {
+            "status": webhook_data.transactionStatus, 
+            "wfp_webhook_received_utc": datetime.utcnow(),
+            "wfp_webhook_data": webhook_data.model_dump()
+            }
+        },
+        upsert=True # Создаст запись, если такой orderReference еще не было
+    )
+
+    if webhook_data.transactionStatus == "Approved":
+        logger.info(f"Payment APPROVED for orderReference: {webhook_data.orderReference}, user_id: {telegram_user_id}")
+        
+        rec_token = webhook_data.recToken
+        if not rec_token:
+            logger.warning(f"REC TOKEN IS EMPTY for successful payment! OrderRef: {webhook_data.orderReference}. Automatic renewals will not be possible.")
+        else:
+            logger.info(f"Received recToken: {rec_token} for OrderRef: {webhook_data.orderReference}")
+
+        try:
+            kyiv_tz = timezone('Europe/Kyiv')
+            current_sub = await db["subscriptions"].find_one({"user_id": telegram_user_id})
+            
+            start_date_obj = datetime.now(kyiv_tz) # По умолчанию, начало подписки - сейчас
+            
+            # Если есть активная подписка, продлеваем от ее даты окончания
+            if current_sub and current_sub.get("is_active") and current_sub.get("subscription_end"):
+                try:
+                    current_end_date_obj = datetime.strptime(current_sub["subscription_end"], "%Y-%m-%d")
+                    # Важно: если current_end_date_obj не имеет tzinfo, нужно его добавить или сравнивать наивные даты
+                    # Для простоты, если дата окончания в будущем, считаем от нее
+                    if current_end_date_obj > datetime.now().date(): # Сравниваем только даты
+                        start_date_obj = datetime.combine(current_end_date_obj, datetime.min.time()) + timedelta(days=1)
+                        start_date_obj = kyiv_tz.localize(start_date_obj) # Локализуем после создания
+                except ValueError as ve:
+                    logger.warning(f"Invalid subscription_end format ('{current_sub.get('subscription_end')}') for user_id {telegram_user_id}, starting new sub from today. Error: {ve}")
+            
+            # Рассчитываем новую дату окончания. Если amount = 1 (тест), можно сделать подписку на 1 день для теста.
+            # days_to_add = 1 if webhook_data.amount == 1 else 30 
+            days_to_add = 30 # Для реальной подписки
+            new_end_date_obj = start_date_obj + relativedelta(days=days_to_add)
+
+            update_fields = {
+                "subscription_start": start_date_obj.strftime("%Y-%m-%d"),
+                "subscription_end": new_end_date_obj.strftime("%Y-%m-%d"),
+                "is_active": 1,
+                "cancel_requested": 0,
+                "rec_token": rec_token,
+                "last_payment_order_ref": webhook_data.orderReference,
+                "last_payment_status": "Approved",
+                "payment_system": webhook_data.paymentSystem,
+                "card_pan_mask": webhook_data.cardPan,
+                "email_from_payment": webhook_data.email,
+                "phone_from_payment": webhook_data.phone,
+                "updated_at_utc": datetime.utcnow()
+            }
+            
+            await db["subscriptions"].update_one(
+                {"user_id": telegram_user_id},
+                {"$set": update_fields, "$setOnInsert": {"user_id": telegram_user_id, "created_at_utc": datetime.utcnow()}},
+                upsert=True
+            )
+            logger.info(f"Subscription activated/extended for user_id: {telegram_user_id} until {new_end_date_obj.strftime('%Y-%m-%d')}. RecToken: {rec_token}")
+
+            # TODO: Интеграция с Telegram-ботом для отправки уведомлений
+            await send_telegram_notification_to_user(telegram_user_id, "Подписка успешно оформлена/продлена до " + new_end_date_obj.strftime('%d.%m.%Y'))
+            await send_telegram_notification_to_admin("Новая подписка: User ID " + str(telegram_user_id))
+
+        except Exception as e:
+            logger.error(f"Error updating subscription in DB for user_id {telegram_user_id}: {e}")
+            # Запрос все равно должен вернуть "accept", чтобы WayForPay не слал повторно
+
+    elif webhook_data.transactionStatus == "Pending":
+        logger.info(f"Payment PENDING for orderReference: {webhook_data.orderReference}, user_id: {telegram_user_id}")
+        # Действий с подпиской не предпринимаем, ждем финального статуса.
+    
+    else: # Declined, Expired и т.д.
+        logger.warning(f"Payment NOT APPROVED. Status: {webhook_data.transactionStatus}, Reason: {webhook_data.reason} (Code: {webhook_data.reasonCode}) for orderReference: {webhook_data.orderReference}")
+        # TODO: Интеграция с Telegram-ботом для отправки уведомления о неудаче
+        await send_telegram_notification_to_user(telegram_user_id, "К сожалению, ваш платеж не прошел. Причина: " + str(webhook_data.reason))
+
+
+    # Формируем и отправляем ответ WayForPay
+    response_time_unix = int(datetime.utcnow().timestamp())
+    response_signature = make_service_response_signature(WAYFORPAY_SECRET_KEY, webhook_data.orderReference, "accept", response_time_unix)
+    
+    return {
+        "orderReference": webhook_data.orderReference,
+        "status": "accept",
+        "time": response_time_unix,
+        "signature": response_signature
+    }
+
 app.include_router(payment_api_router)
