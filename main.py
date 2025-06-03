@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, HTTPException, APIRouter
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta, date
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -92,7 +92,7 @@ class WayForPayServiceWebhook(BaseModel):
     recToken: Optional[str] = None
     transactionStatus: str
     reason: Optional[str] = None # В примере serviceUrl это int (5105), в CHECK_STATUS - строка "Ok"
-    reasonCode: Union[int, str] # В примере serviceUrl это пустая строка, в CHECK_STATUS - int (1100)
+    reasonCode: int | str # Вместо Union[int, str]
     fee: Optional[float] = None
     paymentSystem: Optional[str] = None
 
