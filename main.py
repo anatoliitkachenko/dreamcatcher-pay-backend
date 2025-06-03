@@ -5,7 +5,7 @@ import base64
 import re
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
-from fastapi import FastAPI, Request, HTTPException, APIRouter 
+from fastapi import FastAPI, Request, HTTPException, APIRouter, Body
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta, date
@@ -265,8 +265,29 @@ def verify_service_webhook_signature(secret_key: str, data: WayForPayServiceWebh
 
 # --- Эндпоинт для приема веб-хуков от WayForPay ---
 @payment_api_router.post("/wayforpay-webhook", include_in_schema=False) # Скрываем из OpenAPI схемы
-async def wayforpay_webhook_handler(webhook_data: WayForPayServiceWebhook):
-    logger.info(f"Webhook received from WayForPay: {webhook_data.model_dump_json(indent=2)}")
+# async def wayforpay_webhook_handler(webhook_data: WayForPayServiceWebhook):
+    #logger.info(f"Webhook received from WayForPay: {webhook_data.model_dump_json(indent=2)}")
+async def wayforpay_webhook_handler(request: Request, webhook_data_raw: dict = Body(...)): # Принимаем как сырой dict
+    # Логируем сырое тело запроса, как его получил FastAPI (уже как dict после парсинга JSON)
+    logger.info(f"ПОЛУЧЕН ВЕБ-ХУК (RAW DICT): {webhook_data_raw}")
+
+    # Теперь пробуем валидировать через Pydantic вручную, чтобы увидеть ошибку валидации
+    try:
+        webhook_data = WayForPayServiceWebhook(**webhook_data_raw)
+        logger.info(f"Веб-хук успешно провалидирован Pydantic: {webhook_data.model_dump_json(indent=2)}")
+    except Exception as e_pydantic:
+        logger.error(f"!!! ОШИБКА ВАЛИДАЦИИ PYDANTIC МОДЕЛИ WayForPayServiceWebhook !!!: {e_pydantic}")
+        logger.error(f"Данные, вызвавшие ошибку валидации: {webhook_data_raw}")
+        temp_order_ref = webhook_data_raw.get("orderReference", "UNKNOWN_ORDER_REF_VALIDATION_ERROR")
+        response_time_unix = int(datetime.utcnow().timestamp())
+        # Попытка сгенерировать подпись ответа, даже если данные неполные.
+        # Это может не сработать, если WAYFORPAY_SECRET_KEY не определен глобально.
+        try:
+            response_sig = make_service_response_signature(WAYFORPAY_SECRET_KEY, temp_order_ref, "accept", response_time_unix)
+        except Exception:
+            response_sig = "error_generating_signature"
+
+        return {"orderReference": temp_order_ref, "status": "accept", "time": response_time_unix, "signature": response_sig}
 
     if not verify_service_webhook_signature(WAYFORPAY_SECRET_KEY, webhook_data):
         logger.error(f"CRITICAL: Invalid signature in webhook from WayForPay! OrderRef: {webhook_data.orderReference}. Data will not be processed.")
