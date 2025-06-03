@@ -90,7 +90,7 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
     amount = 0
 
     if plan_type == "subscription":
-        amount = 300 
+        amount = 1 # Было 300, теперь 1 для теста
         product_name_str = "AI Dream Analysis (Subscription)"
         order_ref_prefix = "widget_sub"
     elif plan_type == "single":
