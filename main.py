@@ -15,6 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import logging
+import aiohttp
 from pytz import timezone 
 
 load_dotenv()
@@ -39,6 +40,9 @@ payment_api_router = APIRouter(prefix="/api/pay")
 FRONTEND_DOMAIN_WWW = "https://www.dreamcatcher.guru" # <--- 🟢 ДОБАВЛЕНО 'www.'
 FRONTEND_DOMAIN_NO_WWW = "https://dreamcatcher.guru" # На всякий случай, если иногда без www
 BACKEND_DOMAIN = "https://payapi.dreamcatcher.guru" # Если ваш API на другом поддомене
+
+# URL для внутреннего API уведомлений бота
+BOT_NOTIFICATION_URL = os.getenv('BOT_NOTIFICATION_URL', 'http://157.90.119.107:8001/internal-api/notify') # <--- УКАЖИТЕ РЕАЛЬНЫЙ URL и порт!
 
 # Возможные источники для тестирования, включая локальные
 origins = [
@@ -422,9 +426,22 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
             )
             logger.info(f"Subscription activated/extended for user_id: {telegram_user_id} until {new_end_date_obj.strftime('%Y-%m-%d')}. RecToken: {rec_token}")
 
-            # TODO: Интеграция с Telegram-ботом для отправки уведомлений
-            await send_telegram_notification_to_user(telegram_user_id, "Подписка успешно оформлена/продлена до " + new_end_date_obj.strftime('%d.%m.%Y'))
-            await send_telegram_notification_to_admin("Новая подписка: User ID " + str(telegram_user_id))
+            # Отправка уведомления об успешной подписке
+            notification_data = {
+                'user_id': telegram_user_id,
+                'message_type': 'subscription_success',
+                'details': {
+                    'end_date': new_end_date_obj.strftime('%Y-%m-%d'),
+                    'rec_token': rec_token,
+                    'order_ref': webhook_data.orderReference
+                }
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(BOT_NOTIFICATION_URL, json=notification_data) as resp:
+                    if resp.status == 200:
+                        logger.info(f"Уведомление об успешной подписке отправлено боту для user {telegram_user_id}")
+                    else:
+                        logger.error(f"Ошибка при отправке уведомления боту (статус {resp.status}): {await resp.text()}")
 
         except Exception as e:
             logger.error(f"Error updating subscription in DB for user_id {telegram_user_id}: {e}")
