@@ -95,6 +95,9 @@ class WayForPayServiceWebhook(BaseModel):
     reasonCode: Optional[str] = None
     fee: Optional[float] = None
     paymentSystem: Optional[str] = None
+    repayUrl: Optional[str] = None
+    class Config:
+        extra = 'allow' # или 'ignore'
 
 def make_wayforpay_signature(secret_key: str, params_list: List[str]) -> str:
     sign_str = ';'.join(str(x) for x in params_list)
