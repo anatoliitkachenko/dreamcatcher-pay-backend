@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import base64
 import re
+import json
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI, Request, HTTPException, APIRouter, Body
@@ -267,23 +268,81 @@ def verify_service_webhook_signature(secret_key: str, data: WayForPayServiceWebh
         return False
 
 # --- Эндпоинт для приема веб-хуков от WayForPay ---
-@payment_api_router.post("/wayforpay-webhook", include_in_schema=False) 
-async def wayforpay_webhook_handler(request: Request, webhook_data_raw: dict = Body(...)): # Приймаємо як сирий dict
-    logger.info(f"ОТРИМАНО ВЕБ-ХУК (RAW DICT): {webhook_data_raw}")
-    try:
-        webhook_data = WayForPayServiceWebhook(**webhook_data_raw) # Спроба валідації Pydantic
-        logger.info(f"Веб-хук успішно провалідований Pydantic: {webhook_data.model_dump_json(indent=2)}")
-    except Exception as e_pydantic:
-        logger.error(f"!!! ПОМИЛКА ВАЛІДАЦІЇ PYDANTIC МОДЕЛІ WayForPayServiceWebhook !!!: {e_pydantic}")
-        logger.error(f"Дані, що викликали помилку валідації: {webhook_data_raw}")
-        # Навіть при помилці валідації, потрібно відповісти WayForPay коректно
-        temp_order_ref = webhook_data_raw.get("orderReference", "UNKNOWN_ORDER_REF_VALIDATION_ERROR")
-        response_time_unix = int(datetime.utcnow().timestamp())
+@payment_api_router.post("/wayforpay-webhook", include_in_schema=False)
+async def wayforpay_webhook_handler(request: Request): # Принимаем только объект Request
+    content_type = request.headers.get("content-type")
+    logger.info(f"ОТРИМАНО ВЕБ-ХУК. Content-Type: {content_type}")
 
+    raw_body = await request.body() # Получаем сырые байты тела запроса
+    logger.info(f"RAW Webhook Body (bytes): {raw_body[:1000]}") # Логируем первые 1000 байт сырого тела
+
+    data_to_process = {} # Словарь для данных после парсинга
+
+    try:
+        # Сначала пытаемся понять, как парсить тело, основываясь на Content-Type или предположениях
+        body_str_for_log = ""
+        try:
+            body_str_for_log = raw_body.decode('utf-8', errors='replace') # Для логирования, заменяя ошибки
+        except Exception:
+            body_str_for_log = "Could not decode raw body to string for logging."
+
+
+        if "application/json" in (content_type or "").lower():
+            logger.info("Parsing webhook body as JSON via request.json().")
+            data_to_process = await request.json()
+        elif "application/x-www-form-urlencoded" in (content_type or "").lower():
+            logger.info("Parsing webhook body as Form Data via request.form().")
+            form_data = await request.form()
+            data_to_process = dict(form_data) # Преобразуем FormData (MultiDict) в обычный dict
+        else:
+            # Если Content-Type не ясен, или это просто текстовый JSON (как в PHP примере WayForPay)
+            logger.info(f"Content-Type is '{content_type}'. Attempting to parse raw body as a JSON string.")
+            if not raw_body:
+                logger.warning("Raw body is empty. Cannot parse as JSON string.")
+                raise ValueError("Empty raw body received, cannot parse as JSON.")
+
+            # Используем body_str_for_log, который уже декодирован (или содержит сообщение об ошибке декодирования)
+            logger.info(f"Webhook Body (decoded string for json.loads): {body_str_for_log[:1000]}")
+            if "Could not decode raw body" in body_str_for_log: # Если декодирование не удалось
+                 raise ValueError("Raw body could not be decoded to string for JSON parsing.")
+            data_to_process = json.loads(body_str_for_log) # Парсим строку как JSON
+
+        if not data_to_process and isinstance(data_to_process, dict): # Проверяем, что это словарь и он не пустой
+            logger.warning("data_to_process is an empty dictionary after parsing attempts.")
+            # Не бросаем ошибку здесь, Pydantic валидация ниже это отловит, если поля будут отсутствовать
+
+        logger.info(f"Данні веб-хука для Pydantic валідації (Parsed Dict): {str(data_to_process)[:1000]}")
+
+        # Теперь попытка валидации через Pydantic с полученным словарем data_to_process
+        webhook_data = WayForPayServiceWebhook(**data_to_process)
+        logger.info(f"Веб-хук УСПІШНО провалідований Pydantic: {webhook_data.model_dump_json(indent=2)[:1000]}")
+
+    except Exception as e_parse_or_pydantic: # Ловим ошибки парсинга ИЛИ Pydantic валидации
+        logger.error(f"!!! ПОМИЛКА ОБРОБКИ/ВАЛІДАЦІЇ ВЕБ-ХУКА !!!: {e_parse_or_pydantic}")
+        # Логируем данные, которые вызвали ошибку (если они были получены)
+        if data_to_process: # Если data_to_process было как-то заполнено до ошибки
+            logger.error(f"Дані, що викликали помилку (data_to_process): {str(data_to_process)[:1000]}")
+        else: # Если data_to_process пустое (например, ошибка на этапе json.loads(body_str_for_log))
+            logger.error(f"Дані, що викликали помилку (body_str_for_log): {body_str_for_log[:1000]}")
+
+        # Формируем ответ для WayForPay даже при ошибке
+        # Пытаемся извлечь orderReference из сырых данных или data_to_process для ответа
+        temp_order_ref = "UNKNOWN_ORDER_REF_ERROR"
+        if isinstance(data_to_process, dict) and data_to_process.get("orderReference"):
+            temp_order_ref = data_to_process.get("orderReference")
+        else: # Попытка найти orderReference в сырой строке (если парсинг до словаря не удался)
+            try:
+                match_order_ref = re.search(r'"orderReference"\s*:\s*"([^"]+)"', body_str_for_log)
+                if match_order_ref:
+                    temp_order_ref = match_order_ref.group(1)
+            except Exception:
+                pass # Игнорируем, если не удалось извлечь
+
+        response_time_unix = int(datetime.utcnow().timestamp())
         try:
             response_sig = make_service_response_signature(WAYFORPAY_SECRET_KEY, temp_order_ref, "accept", response_time_unix)
-        except Exception:
-            response_sig = "error_generating_signature"
+        except Exception: # На случай, если даже генерация подписи для ответа упадет
+            response_sig = "error_generating_signature_on_error_path"
         return {"orderReference": temp_order_ref, "status": "accept", "time": response_time_unix, "signature": response_sig}
 
     if not verify_service_webhook_signature(WAYFORPAY_SECRET_KEY, webhook_data):
