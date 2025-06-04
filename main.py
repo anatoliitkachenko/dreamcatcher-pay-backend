@@ -92,9 +92,8 @@ class WayForPayServiceWebhook(BaseModel):
     issuerBankName: Optional[str] = None
     recToken: Optional[str] = None
     transactionStatus: str
-    reason: Optional[str] = None # В примере serviceUrl это int (5105), в CHECK_STATUS - строка "Ok"
-    reasonCode: Optional[str] = None
-    fee: Optional[float] = None
+    reason: Optional[str] = None 
+    reasonCode: Optional[int] = None
     paymentSystem: Optional[str] = None
     repayUrl: Optional[str] = None
     class Config:
