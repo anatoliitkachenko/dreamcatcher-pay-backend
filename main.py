@@ -279,40 +279,34 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
     data_to_process = {} # Словарь для данных после парсинга
 
     try:
-        # Сначала пытаемся понять, как парсить тело, основываясь на Content-Type или предположениях
-        body_str_for_log = ""
+        # Декодируем сырое тело запроса в строку.
+            # Это предварительный шаг, чтобы потом работать с текстовым JSON.
+        body_str_for_parsing = ""
         try:
-            body_str_for_log = raw_body.decode('utf-8', errors='replace') # Для логирования, заменяя ошибки
-        except Exception:
-            body_str_for_log = "Could not decode raw body to string for logging."
+            body_str_for_parsing = raw_body.decode('utf-8')
+        except UnicodeDecodeError as e_unicode:
+            logger.error(f"UnicodeDecodeError when decoding raw body: {e_unicode}. Body (partial bytes): {raw_body[:100]}")
+            raise ValueError(f"Cannot decode raw body from UTF-8: {e_unicode}") # Прерываем выполнение, если не можем декодировать
 
+        logger.info(f"Attempting to parse the entire DECODED body string as JSON. Decoded body for parsing: {body_str_for_parsing[:1000]}")
 
-        if "application/json" in (content_type or "").lower():
-            logger.info("Parsing webhook body as JSON via request.json().")
-            data_to_process = await request.json()
-        elif "application/x-www-form-urlencoded" in (content_type or "").lower():
-            logger.info("Parsing webhook body as Form Data via request.form().")
-            form_data = await request.form()
-            data_to_process = dict(form_data) # Преобразуем FormData (MultiDict) в обычный dict
-        else:
-            # Если Content-Type не ясен, или это просто текстовый JSON (как в PHP примере WayForPay)
-            logger.info(f"Content-Type is '{content_type}'. Attempting to parse raw body as a JSON string.")
-            if not raw_body:
-                logger.warning("Raw body is empty. Cannot parse as JSON string.")
-                raise ValueError("Empty raw body received, cannot parse as JSON.")
+        if not body_str_for_parsing.strip(): # Проверяем, не пустая ли строка после удаления пробелов
+            logger.warning("Decoded body string is empty or whitespace. Cannot parse as JSON.")
+            raise ValueError("Empty or whitespace decoded body string received, cannot parse as JSON.")
+            
+        # Основная попытка парсинга: считаем, что вся строка body_str_for_parsing - это JSON
+        data_to_process = json.loads(body_str_for_parsing)
 
-            # Используем body_str_for_log, который уже декодирован (или содержит сообщение об ошибке декодирования)
-            logger.info(f"Webhook Body (decoded string for json.loads): {body_str_for_log[:1000]}")
-            if "Could not decode raw body" in body_str_for_log: # Если декодирование не удалось
-                 raise ValueError("Raw body could not be decoded to string for JSON parsing.")
-            data_to_process = json.loads(body_str_for_log) # Парсим строку как JSON
+        # Проверка, что результат парсинга - это словарь
+        if not isinstance(data_to_process, dict):
+            logger.error(f"Parsing decoded body as JSON did not result in a dictionary. Parsed type: {type(data_to_process)}. Data: {str(data_to_process)[:1000]}")
+            raise ValueError(f"Expected a JSON object (dict) after parsing, but got {type(data_to_process)}")
+            
+        # Если data_to_process пустой словарь {} (валидный JSON), Pydantic это отловит ниже, если поля обязательные
+        # Поэтому отдельная проверка if not data_to_process не так критична здесь, если это dict.
 
-        if not data_to_process and isinstance(data_to_process, dict): # Проверяем, что это словарь и он не пустой
-            logger.warning("data_to_process is an empty dictionary after parsing attempts.")
-            # Не бросаем ошибку здесь, Pydantic валидация ниже это отловит, если поля будут отсутствовать
-
-        logger.info(f"Данні веб-хука для Pydantic валідації (Parsed Dict): {str(data_to_process)[:1000]}")
-
+        logger.info(f"Данні веб-хука для Pydantic валідації (Parsed Dict from decoded body): {str(data_to_process)[:1000]}")
+            
         # Теперь попытка валидации через Pydantic с полученным словарем data_to_process
         webhook_data = WayForPayServiceWebhook(**data_to_process)
         logger.info(f"Веб-хук УСПІШНО провалідований Pydantic: {webhook_data.model_dump_json(indent=2)[:1000]}")
