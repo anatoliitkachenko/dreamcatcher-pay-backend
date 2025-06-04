@@ -247,8 +247,7 @@ def verify_service_webhook_signature(secret_key: str, data: WayForPayServiceWebh
     fields_for_signature_check = [
         data.merchantAccount,
         data.orderReference,
-        str(data.amount), 
-        data.currency,
+        str(int(data.amount)) if data.amount and data.amount == int(data.amount) else str(data.amount),
         auth_code_for_sig,
         card_pan_for_sig,
         data.transactionStatus,
