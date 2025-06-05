@@ -233,6 +233,47 @@ async def check_access_endpoint(user_id: str): # Переименовал, чт�
     logger.info(f"Доступ неактивен для user_id {user_id_int} через /api/pay/check-access. Данные подписки: {sub}")
     return {"active": False}
 
+async def send_telegram_notification_to_user(user_id: int, message_key_or_text: str, details: Optional[dict] = None):
+    """
+    Отправляет команду на уведомление пользователя через внутренний API бота.
+    message_key_or_text: Ключ сообщения из словаря MESSAGES бота или прямой текст.
+    details: Дополнительные данные для формирования сообщения, если это ключ.
+    """
+    logger.info(f"Attempting to send notification to user {user_id} via bot API. Message/Key: {message_key_or_text}")
+    notification_data = {
+        'user_id': user_id,
+        'recipient_type': 'user', # Добавим тип получателя для универсальности
+        'message_key_or_text': message_key_or_text,
+        'details': details or {}
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(BOT_NOTIFICATION_URL, json=notification_data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    logger.info(f"Уведомление для user {user_id} успешно передано боту.")
+                else:
+                    logger.error(f"Ошибка при передаче уведомления боту для user {user_id} (статус {resp.status}): {await resp.text()}")
+    except Exception as e:
+        logger.error(f"Исключение при отправке уведомления боту для user {user_id}: {e}")
+
+async def send_telegram_notification_to_admin(message: str, details: Optional[dict] = None):
+    """Отправляет команду на уведомление администратора через внутренний API бота."""
+    logger.info(f"Attempting to send notification to admin via bot API: {message}")
+    notification_data = {
+        'recipient_type': 'admin', # Добавим тип получателя
+        'message_key_or_text': message, # Для админа пока прямой текст
+        'details': details or {}
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(BOT_NOTIFICATION_URL, json=notification_data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    logger.info(f"Уведомление для админа успешно передано боту.")
+                else:
+                    logger.error(f"Ошибка при передаче уведомления админу боту (статус {resp.status}): {await resp.text()}")
+    except Exception as e:
+        logger.error(f"Исключение при отправке уведомления админу боту: {e}")
+
 # --- Функция для генерации подписи ответа вашего serviceUrl для WayForPay ---
 def make_service_response_signature(secret_key: str, order_reference: str, status: str, time_unix: int) -> str:
     sign_str = f"{order_reference};{status};{str(time_unix)}"
@@ -390,12 +431,16 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
             # Если есть активная подписка, продлеваем от ее даты окончания
             if current_sub and current_sub.get("is_active") and current_sub.get("subscription_end"):
                 try:
-                    current_end_date_obj = datetime.strptime(current_sub["subscription_end"], "%Y-%m-%d")
-                    # Важно: если current_end_date_obj не имеет tzinfo, нужно его добавить или сравнивать наивные даты
-                    # Для простоты, если дата окончания в будущем, считаем от нее
-                    if current_end_date_obj > datetime.now().date(): # Сравниваем только даты
-                        start_date_obj = datetime.combine(current_end_date_obj, datetime.min.time()) + timedelta(days=1)
-                        start_date_obj = kyiv_tz.localize(start_date_obj) # Локализуем после создания
+                    # Преобразуем строку с датой окончания из БД в объект datetime.datetime
+                    current_end_datetime_obj = datetime.strptime(current_sub["subscription_end"], "%Y-%m-%d")
+                    # Получаем только дату из этого объекта для сравнения
+                    current_end_date_part = current_end_datetime_obj.date()
+                    
+                    # Сравниваем с текущей датой (тоже только часть даты, с учетом таймзоны Киева)
+                    if current_end_date_part > datetime.now(kyiv_tz).date(): 
+                        # Если текущая подписка еще не истекла, новая начнется со следующего дня после ее окончания
+                        start_date_obj_naive = datetime.combine(current_end_date_part, datetime.min.time()) + timedelta(days=1)
+                        start_date_obj = kyiv_tz.localize(start_date_obj_naive)
                 except ValueError as ve:
                     logger.warning(f"Invalid subscription_end format ('{current_sub.get('subscription_end')}') for user_id {telegram_user_id}, starting new sub from today. Error: {ve}")
             
@@ -424,28 +469,29 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
                 {"$set": update_fields, "$setOnInsert": {"user_id": telegram_user_id, "created_at_utc": datetime.utcnow()}},
                 upsert=True
             )
+            # ... (после успешного обновления подписки в БД)
             logger.info(f"Subscription activated/extended for user_id: {telegram_user_id} until {new_end_date_obj.strftime('%Y-%m-%d')}. RecToken: {rec_token}")
 
-            # Отправка уведомления об успешной подписке
-            notification_data = {
-                'user_id': telegram_user_id,
-                'message_type': 'subscription_success',
-                'details': {
-                    'end_date': new_end_date_obj.strftime('%Y-%m-%d'),
-                    'rec_token': rec_token,
-                    'order_ref': webhook_data.orderReference
+            await send_telegram_notification_to_user(
+                user_id=telegram_user_id, 
+                message_key_or_text="subscription_success", 
+                details={
+                    "end_date": new_end_date_obj.strftime('%d.%m.%Y'),
                 }
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(BOT_NOTIFICATION_URL, json=notification_data) as resp:
-                    if resp.status == 200:
-                        logger.info(f"Уведомление об успешной подписке отправлено боту для user {telegram_user_id}")
-                    else:
-                        logger.error(f"Ошибка при отправке уведомления боту (статус {resp.status}): {await resp.text()}")
+            )
+            
+            await send_telegram_notification_to_admin(
+                message=(
+                    f"✨ Новая/продленная подписка:\n"
+                    f"ID: {telegram_user_id}\n"
+                    f"До: {new_end_date_obj.strftime('%Y-%m-%d')}\n"
+                    f"RecToken: {rec_token}\n"
+                    f"OrderRef: {webhook_data.orderReference}"
+                )
+            )
 
         except Exception as e:
             logger.error(f"Error updating subscription in DB for user_id {telegram_user_id}: {e}")
-            # Запрос все равно должен вернуть "accept", чтобы WayForPay не слал повторно
 
     elif webhook_data.transactionStatus == "Pending":
         logger.info(f"Payment PENDING for orderReference: {webhook_data.orderReference}, user_id: {telegram_user_id}")
@@ -454,7 +500,17 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
     else: # Declined, Expired и т.д.
         logger.warning(f"Payment NOT APPROVED. Status: {webhook_data.transactionStatus}, Reason: {webhook_data.reason} (Code: {webhook_data.reasonCode}) for orderReference: {webhook_data.orderReference}")
         # TODO: Интеграция с Telegram-ботом для отправки уведомления о неудаче
-        await send_telegram_notification_to_user(telegram_user_id, "К сожалению, ваш платеж не прошел. Причина: " + str(webhook_data.reason))
+        await send_telegram_notification_to_user(
+            telegram_user_id,
+            "payment_declined", # Ключ из словаря MESSAGES в боте
+            details={
+                "reason": str(webhook_data.reason),
+                "support_contact": "ВАШ_КОНТАКТ_ПОДДЕРЖКИ"
+            }
+        )
+        await send_telegram_notification_to_admin(
+            f"❌ Отклоненный платеж:\nID: {telegram_user_id}\nПричина: {webhook_data.reason}\nOrderRef: {webhook_data.orderReference}"
+        )
 
 
     # Формируем и отправляем ответ WayForPay
