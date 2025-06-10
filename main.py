@@ -447,7 +447,7 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
             # Рассчитываем новую дату окончания. Если amount = 1 (тест), можно сделать подписку на 1 день для теста.
             # days_to_add = 1 if webhook_data.amount == 1 else 30 
             days_to_add = 30 # Для реальной подписки
-            new_end_date_obj = start_date_obj + relativedelta(days=days_to_add)
+            new_end_date_obj = start_date_obj + timedelta(days=days_to_add)
 
             update_fields = {
                 "subscription_start": start_date_obj.strftime("%Y-%m-%d"),
