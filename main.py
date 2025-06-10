@@ -445,10 +445,7 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
                     logger.warning(f"Invalid subscription_end format ('{current_sub.get('subscription_end')}') for user_id {telegram_user_id}, starting new sub from today. Error: {ve}")
             
             # Рассчитываем новую дату окончания. Если amount = 1 (тест), можно сделать подписку на 1 день для теста.
-            # days_to_add = 1 if webhook_data.amount == 1 else 30 
-            days_to_add = 30 # Для реальной подписки
-            new_end_date_obj = start_date_obj + timedelta(days=days_to_add)
-
+            new_end_date_obj = start_date_obj + relativedelta(months=1)
             update_fields = {
                 "subscription_start": start_date_obj.strftime("%Y-%m-%d"),
                 "subscription_end": new_end_date_obj.strftime("%Y-%m-%d"),
