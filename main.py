@@ -562,7 +562,7 @@ async def cancel_subscription_endpoint(request_data: CancelSubscriptionRequest):
         signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_to_sign)
 
         wfp_request_data = {
-            "transactionType": "REMOVE_CARD",
+            "transactionType": "removeCard",
             "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
             "orderReference": order_reference,
             "recToken": rec_token,
