@@ -569,7 +569,8 @@ async def cancel_subscription_endpoint(request_data: CancelSubscriptionRequest):
             "merchantSignature": signature,
             "apiVersion": 1
         }
-        
+        logger.info(f"ОТПРАВКА В WAYFORPAY: {wfp_request_data}")
+
         # 3. Отправляем запрос в WayForPay
         # Внутри функции cancel_subscription_endpoint
 
