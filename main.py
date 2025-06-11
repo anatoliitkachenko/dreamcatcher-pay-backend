@@ -103,6 +103,9 @@ class WayForPayServiceWebhook(BaseModel):
     class Config:
         extra = 'allow' # или 'ignore'
 
+class CancelSubscriptionRequest(BaseModel):
+    user_id: int
+
 def make_wayforpay_signature(secret_key: str, params_list: List[str]) -> str:
     sign_str = ';'.join(str(x) for x in params_list)
     # Для большинства API WayForPay подпись HMAC-MD5 в hex-формате
@@ -120,7 +123,7 @@ async def get_widget_payment_params(request_data: WidgetParamsRequest):
     amount = 0
 
     if plan_type == "subscription":
-        amount = 1 # Было 300, теперь 1 для теста
+        amount = 300 # Было 300, теперь 1 для теста
         product_name_str = "AI Dream Analysis (Subscription)"
         order_ref_prefix = "widget_sub"
     elif plan_type == "single":
@@ -444,7 +447,7 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
                 except ValueError as ve:
                     logger.warning(f"Invalid subscription_end format ('{current_sub.get('subscription_end')}') for user_id {telegram_user_id}, starting new sub from today. Error: {ve}")
             
-            # Рассчитываем новую дату окончания. Если amount = 1 (тест), можно сделать подписку на 1 день для теста.
+            # Рассчитываем новую дату окончания. Если amount = 1 (тест), можно сделать подписку на 1 день для теста.git add .
             new_end_date_obj = start_date_obj + relativedelta(months=1)
             update_fields = {
                 "subscription_start": start_date_obj.strftime("%Y-%m-%d"),
@@ -520,5 +523,76 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
         "time": response_time_unix,
         "signature": response_signature
     }
+
+@payment_api_router.post("/cancel-subscription", tags=["Subscription"])
+async def cancel_subscription_endpoint(request_data: CancelSubscriptionRequest):
+    """
+    Эндпоинт для отмены рекуррентной подписки через WayForPay.
+    Вызывается из телеграм-бота.
+    """
+    user_id = request_data.user_id
+    logger.info(f"Получен запрос на отмену подписки для user_id: {user_id}")
+
+    # 1. Находим подписку и токен карты (recToken) в нашей базе
+    sub_doc = await db["subscriptions"].find_one({"user_id": user_id, "is_active": 1})
+    if not sub_doc:
+        logger.warning(f"Активная подписка для отмены не найдена для user_id: {user_id}")
+        raise HTTPException(status_code=404, detail="Active subscription not found.")
+
+    rec_token = sub_doc.get("rec_token")
+    if not rec_token:
+        logger.warning(f"У пользователя {user_id} активная подписка, но нет rec_token. Отмена невозможна.")
+        # В этом случае просто помечаем ее как отмененную в нашей системе
+        await db["subscriptions"].update_one(
+            {"user_id": user_id},
+            {"$set": {"cancel_requested": 1}}
+        )
+        return {"status": "success", "message": "Subscription marked as cancelled locally (no recToken found)."}
+
+    # 2. Формируем запрос в WayForPay для отмены рекуррентных платежей (удаления карты)
+    # Для этого используется API-метод 'removeCard'
+    order_reference = f"remove_card_{user_id}_{int(datetime.utcnow().timestamp())}"
+    
+    try:
+        params_to_sign = [
+            WAYFORPAY_MERCHANT_ACCOUNT,
+            order_reference,
+            rec_token
+        ]
+        signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_to_sign)
+
+        wfp_request_data = {
+            "transactionType": "REMOVE_CARD",
+            "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
+            "orderReference": order_reference,
+            "recToken": rec_token,
+            "merchantSignature": signature,
+            "apiVersion": 1
+        }
+        
+        # 3. Отправляем запрос в WayForPay
+        wfp_api_url = "https://api.wayforpay.com/api"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(wfp_api_url, json=wfp_request_data) as resp:
+                response_data = await resp.json()
+                logger.info(f"Ответ от WayForPay на removeCard для user_id {user_id}: {response_data}")
+
+                # 4. Проверяем ответ от WayForPay
+                if resp.status == 200 and response_data.get("reasonCode") == 1111: # 1111 - Card was removed successfully
+                    logger.info(f"WayForPay подтвердил отмену рекуррентных платежей для user_id {user_id}")
+                    # 5. Обновляем нашу базу данных, ставим флаг отмены
+                    await db["subscriptions"].update_one(
+                        {"user_id": user_id},
+                        {"$set": {"cancel_requested": 1}}
+                    )
+                    return {"status": "success", "message": "Recurring payment successfully cancelled."}
+                else:
+                    error_reason = response_data.get("reason", "Unknown WayForPay error")
+                    logger.error(f"WayForPay не смог отменить подписку для user_id {user_id}. Причина: {error_reason}")
+                    raise HTTPException(status_code=502, detail=f"WayForPay API error: {error_reason}")
+
+    except Exception as e:
+        logger.error(f"Исключение при отмене рекуррентного платежа для user_id {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while cancelling subscription.")
 
 app.include_router(payment_api_router)
