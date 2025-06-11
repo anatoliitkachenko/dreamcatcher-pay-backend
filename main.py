@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 MONGO_URI = os.getenv("MONGO_URI")
 WAYFORPAY_MERCHANT_ACCOUNT = os.getenv("WAYFORPAY_MERCHANT_ACCOUNT")
 WAYFORPAY_SECRET_KEY = os.getenv("WAYFORPAY_SECRET_KEY")
+WAYFORPAY_MERCHANT_PASSWORD = os.getenv("WAYFORPAY_MERCHANT_PASSWORD")
 WAYFORPAY_DOMAIN = os.getenv("WAYFORPAY_DOMAIN")
 
 mongo_client = AsyncIOMotorClient(MONGO_URI)
@@ -526,86 +527,56 @@ async def wayforpay_webhook_handler(request: Request): # Принимаем то
 
 @payment_api_router.post("/cancel-subscription", tags=["Subscription"])
 async def cancel_subscription_endpoint(request_data: CancelSubscriptionRequest):
-    """
-    Эндпоинт для отмены рекуррентной подписки через WayForPay.
-    Вызывается из телеграм-бота.
-    """
     user_id = request_data.user_id
-    logger.info(f"Получен запрос на отмену подписки для user_id: {user_id}")
+    logger.info(f"Получен запрос на УДАЛЕНИЕ подписки для user_id: {user_id} через regularApi")
 
-    # 1. Находим подписку и токен карты (recToken) в нашей базе
+    # 1. Находим подписку и orderReference в нашей базе
     sub_doc = await db["subscriptions"].find_one({"user_id": user_id, "is_active": 1})
     if not sub_doc:
-        logger.warning(f"Активная подписка для отмены не найдена для user_id: {user_id}")
+        logger.warning(f"Активная подписка для удаления не найдена для user_id: {user_id}")
         raise HTTPException(status_code=404, detail="Active subscription not found.")
 
-    rec_token = sub_doc.get("rec_token")
-    if not rec_token:
-        logger.warning(f"У пользователя {user_id} активная подписка, но нет rec_token. Отмена невозможна.")
-        # В этом случае просто помечаем ее как отмененную в нашей системе
-        await db["subscriptions"].update_one(
-            {"user_id": user_id},
-            {"$set": {"cancel_requested": 1}}
-        )
-        return {"status": "success", "message": "Subscription marked as cancelled locally (no recToken found)."}
+    # Для удаления нужен orderReference платежа, который создал подписку
+    order_ref_to_cancel = sub_doc.get("last_payment_order_ref")
+    if not order_ref_to_cancel:
+        logger.error(f"У пользователя {user_id} нет orderReference для отмены. Отмена невозможна.")
+        raise HTTPException(status_code=400, detail="Order reference not found, cannot cancel.")
 
-    # 2. Формируем запрос в WayForPay для отмены рекуррентных платежей (удаления карты)
-    # Для этого используется API-метод 'removeCard'
-    order_reference = f"remove_card_{user_id}_{int(datetime.utcnow().timestamp())}"
+    # 2. Формируем запрос в WayForPay для удаления регулярного платежа
+    wfp_api_url = "https://api.wayforpay.com/regularApi"
+    wfp_request_data = {
+        "requestType": "REMOVE",
+        "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
+        "merchantPassword": WAYFORPAY_MERCHANT_PASSWORD,
+        "orderReference": order_ref_to_cancel
+    }
     
+    logger.info(f"ОТПРАВКА В WAYFORPAY regularApi: {wfp_request_data}")
+
     try:
-        params_to_sign = [
-            WAYFORPAY_MERCHANT_ACCOUNT,
-            order_reference,
-            rec_token
-        ]
-        signature = make_wayforpay_signature(WAYFORPAY_SECRET_KEY, params_to_sign)
-
-        wfp_request_data = {
-            "transactionType": "removeCard",
-            "merchantAccount": WAYFORPAY_MERCHANT_ACCOUNT,
-            "orderReference": order_reference,
-            "recToken": rec_token,
-            "merchantSignature": signature,
-            "apiVersion": 1
-        }
-        logger.info(f"ОТПРАВКА В WAYFORPAY: {wfp_request_data}")
-
-        # 3. Отправляем запрос в WayForPay
-        # Внутри функции cancel_subscription_endpoint
-
-        wfp_api_url = "https://api.wayforpay.com/api"
         async with aiohttp.ClientSession() as session:
             async with session.post(wfp_api_url, json=wfp_request_data) as resp:
-                if resp.status == 200:
-                    if 'application/json' in resp.headers.get('Content-Type', ''):
-                        response_data = await resp.json()
-                        logger.info(f"Ответ от WayForPay на removeCard для user_id {user_id}: {response_data}")
+                response_data = await resp.json()
+                logger.info(f"Ответ от WayForPay на REMOVE для user_id {user_id}: {response_data}")
 
-                        if response_data.get("reasonCode") == 1111: # 1111 - Card was removed successfully
-                            logger.info(f"WayForPay подтвердил отмену рекуррентных платежей для user_id {user_id}")
-                            await db["subscriptions"].update_one(
-                                {"user_id": user_id},
-                                {"$set": {"cancel_requested": 1}}
-                            )
-                            return {"status": "success", "message": "Recurring payment successfully cancelled."}
-                        else:
-                            error_reason = response_data.get("reason", "Unknown WayForPay error")
-                            logger.error(f"WayForPay не смог отменить подписку для user_id {user_id}. Причина: {error_reason}")
-                            raise HTTPException(status_code=502, detail=f"WayForPay API error: {error_reason}")
-
-                    else:
-                        html_response = await resp.text()
-                        logger.error(f"!!! WayForPay вернул НЕ JSON (статус 200). Ответ (HTML): {html_response[:1000]} !!!")
-                        raise HTTPException(status_code=502, detail="WayForPay returned an unexpected response format (HTML).")
-
+                # 4. Проверяем ответ от WayForPay. Успешный код - 4100
+                if resp.status == 200 and response_data.get("reasonCode") == 4100:
+                    logger.info(f"WayForPay подтвердил УДАЛЕНИЕ рекуррентного платежа для user_id {user_id}")
+                    
+                    # 5. Обновляем нашу базу данных, ставим флаг отмены
+                    await db["subscriptions"].update_one(
+                        {"user_id": user_id},
+                        {"$set": {"cancel_requested": 1, "is_active": 0}} # Можно сразу деактивировать
+                    )
+                    return {"status": "success", "message": "Recurring payment successfully removed."}
                 else:
-                    error_text = await resp.text()
-                    logger.error(f"WayForPay вернул ошибку со статусом {resp.status}. Тело ответа: {error_text}")
-                    raise HTTPException(status_code=502, detail=f"WayForPay API returned status {resp.status}")
+                    error_reason = response_data.get("reason", "Unknown WayForPay error")
+                    reason_code = response_data.get("reasonCode", "N/A")
+                    logger.error(f"WayForPay не смог удалить подписку для user_id {user_id}. Код: {reason_code}, Причина: {error_reason}")
+                    raise HTTPException(status_code=502, detail=f"WayForPay API error: {error_reason}")
 
     except Exception as e:
-        logger.error(f"Исключение при отмене рекуррентного платежа для user_id {user_id}: {e}", exc_info=True)
+        logger.error(f"Исключение при удалении рекуррентного платежа для user_id {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while cancelling subscription.")
-
+    
 app.include_router(payment_api_router)
