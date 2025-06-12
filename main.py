@@ -566,7 +566,7 @@ async def cancel_subscription_endpoint(request_data: CancelSubscriptionRequest):
                     # 5. Обновляем нашу базу данных, ставим флаг отмены
                     await db["subscriptions"].update_one(
                         {"user_id": user_id},
-                        {"$set": {"cancel_requested": 1, "is_active": 0}} # Можно сразу деактивировать
+                        {"$set": {"cancel_requested": 1}}
                     )
                     return {"status": "success", "message": "Recurring payment successfully removed."}
                 else:
