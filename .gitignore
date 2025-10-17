@@ -1,1 +1,34 @@
+# Environment variables
 .env
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment (НЕ УДАЛЯТЬ venv с диска, только из git!)
+venv/
+env/
+ENV/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
